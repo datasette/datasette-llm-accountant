@@ -9,7 +9,7 @@ import httpx
 
 # Cache the pricing data globally
 _pricing_cache: Optional[dict] = None
-_PRICING_URL = "https://www.llm-prices.com/current-v1.json"
+_PRICING_URL = "https://simonw.github.io/llm-prices/current-v1.json"
 _PRICING_TIMEOUT = 10.0
 
 
