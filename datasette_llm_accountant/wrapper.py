@@ -213,3 +213,6 @@ class LlmWrapper:
         async_model = llm.get_async_model(model_id)
         accountants = self._get_accountants()
         return AccountedModel(async_model, accountants)
+
+    def get_async_models(self):
+        return llm.get_async_models()
