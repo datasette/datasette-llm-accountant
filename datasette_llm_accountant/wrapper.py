@@ -86,10 +86,10 @@ class AccountedTransaction:
         Raises:
             ReservationExceededError: If the cost exceeds the reservation
         """
-        response = self.model._async_model.prompt(prompt_text, **kwargs)
+        response = await self.model._async_model.prompt(prompt_text, **kwargs)
 
         # Get the full text to ensure completion
-        text = response.text()
+        text = await response.text()
 
         # Calculate the cost
         usage = await response.usage()
@@ -119,7 +119,7 @@ class AccountedModel:
 
     def __init__(
         self,
-        async_model: llm.Model,
+        async_model: llm.models.AsyncModel,
         accountants: List[Accountant],
     ):
         self._async_model = async_model
