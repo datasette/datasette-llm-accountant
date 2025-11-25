@@ -92,7 +92,7 @@ class AccountedTransaction:
         text = response.text()
 
         # Calculate the cost
-        usage = response.usage()
+        usage = await response.usage()
         model_id = self.model._async_model.model_id
 
         cost_nanocents = calculate_cost_nanocents(
