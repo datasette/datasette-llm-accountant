@@ -72,7 +72,7 @@ class AccountedTransaction:
                 # Log but don't raise - we want to rollback all
                 print(f"Error rolling back transaction: {e}")
 
-    async def prompt(self, prompt_text: str, **kwargs):
+    async def prompt(self, prompt_text: str, **kwargs) -> llm.AsyncResponse:
         """
         Execute a prompt and track the cost against this reservation.
 
@@ -94,8 +94,8 @@ class AccountedTransaction:
 
         cost_nanocents = calculate_cost_nanocents(
             model_id,
-            input_tokens=usage.input,
-            output_tokens=usage.output,
+            input_tokens=usage.input or 0,
+            output_tokens=usage.output or 0,
         )
 
         # Check if we've exceeded the reservation
@@ -147,7 +147,7 @@ class AccountedModel:
 
         return AccountedTransaction(self, nanocents, self._accountants)
 
-    async def prompt(self, prompt_text: str, usd: float = 0.5, **kwargs):
+    async def prompt(self, prompt_text: str, usd: float = 0.5, **kwargs) -> llm.AsyncResponse:
         """
         Execute a prompt with automatic reservation.
 
