@@ -88,9 +88,6 @@ class AccountedTransaction:
         """
         response = await self.model._async_model.prompt(prompt_text, **kwargs)
 
-        # Get the full text to ensure completion
-        text = await response.text()
-
         # Calculate the cost
         usage = await response.usage()
         model_id = self.model._async_model.model_id
@@ -109,7 +106,7 @@ class AccountedTransaction:
             )
 
         self.spent_nanocents = new_total
-        return text
+        return response
 
 
 class AccountedModel:
