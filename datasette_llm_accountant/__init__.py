@@ -30,14 +30,3 @@ __all__ = [
     "nanocents_to_usd",
     "ModelPricingNotFoundError",
 ]
-
-from datasette import Response
-
-def dbg():
-  return Response.json(
-        {"ok": True, "foo": "bar1"}
-    )
-
-@hookimpl
-def register_routes():
-  return [(r"^/-/dbg$", dbg)]
