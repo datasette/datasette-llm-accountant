@@ -59,12 +59,15 @@ def create_mock_model(model_id="gpt-4o-mini", responses=None):
     model = Mock()
     model.model_id = model_id
 
+    # Make prompt an AsyncMock
     if responses:
-        # If multiple responses provided, return them in sequence
-        model.prompt = Mock(side_effect=responses)
+        # If multiple responses provided, return them in sequence (as async)
+        async def prompt_side_effect(*args, **kwargs):
+            return responses.pop(0)
+        model.prompt = AsyncMock(side_effect=prompt_side_effect)
     else:
-        # Default single response
-        model.prompt = Mock(return_value=create_mock_response(100, 50, model_id))
+        # Default single response (as async)
+        model.prompt = AsyncMock(return_value=create_mock_response(100, 50, model_id))
 
     return model
 
@@ -95,7 +98,7 @@ async def test_accounted_model_reserve_and_prompt():
     assert accountant.settlements[0][1] == 4_500_000
 
     # Check response
-    assert result == "Mock response text"
+    assert await result.text() == "Mock response text"
 
 
 @pytest.mark.asyncio
@@ -117,7 +120,7 @@ async def test_accounted_model_direct_prompt():
 
     # Check settlement
     assert len(accountant.settlements) == 1
-    assert result == "Mock response text"
+    assert await result.text() == "Mock response text"
 
 
 @pytest.mark.asyncio

@@ -72,7 +72,7 @@ class AccountedTransaction:
                 # Log but don't raise - we want to rollback all
                 print(f"Error rolling back transaction: {e}")
 
-    async def prompt(self, prompt_text: str, **kwargs):
+    async def prompt(self, prompt_text: str, **kwargs) -> llm.AsyncResponse:
         """
         Execute a prompt and track the cost against this reservation.
 
@@ -86,10 +86,7 @@ class AccountedTransaction:
         Raises:
             ReservationExceededError: If the cost exceeds the reservation
         """
-        response = self.model._async_model.prompt(prompt_text, **kwargs)
-
-        # Get the full text to ensure completion
-        text = await response.text()
+        response = await self.model._async_model.prompt(prompt_text, **kwargs)
 
         # Calculate the cost
         usage = await response.usage()
@@ -97,8 +94,8 @@ class AccountedTransaction:
 
         cost_nanocents = calculate_cost_nanocents(
             model_id,
-            input_tokens=usage.input,
-            output_tokens=usage.output,
+            input_tokens=usage.input or 0,
+            output_tokens=usage.output or 0,
         )
 
         # Check if we've exceeded the reservation
@@ -109,7 +106,7 @@ class AccountedTransaction:
             )
 
         self.spent_nanocents = new_total
-        return text
+        return response
 
 
 class AccountedModel:
@@ -119,7 +116,7 @@ class AccountedModel:
 
     def __init__(
         self,
-        async_model: llm.Model,
+        async_model: llm.models.AsyncModel,
         accountants: List[Accountant],
     ):
         self._async_model = async_model
@@ -150,7 +147,7 @@ class AccountedModel:
 
         return AccountedTransaction(self, nanocents, self._accountants)
 
-    async def prompt(self, prompt_text: str, usd: float = 0.5, **kwargs):
+    async def prompt(self, prompt_text: str, usd: float = 0.5, **kwargs) -> llm.AsyncResponse:
         """
         Execute a prompt with automatic reservation.
 
@@ -213,3 +210,6 @@ class LlmWrapper:
         async_model = llm.get_async_model(model_id)
         accountants = self._get_accountants()
         return AccountedModel(async_model, accountants)
+
+    def get_async_models(self):
+        return llm.get_async_models()
