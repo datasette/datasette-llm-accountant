@@ -1,9 +1,7 @@
 set positional-arguments
 
 test *args:
-    uv run --isolated --with-editable '.[test]' pytest "$@"
+    uv run pytest "$@"
 
 datasette *args:
-    uv run --isolated \
-      --with-editable '.[test]' \
-      datasette "$@" \
+    uv run datasette "$@"
