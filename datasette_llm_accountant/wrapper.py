@@ -179,10 +179,10 @@ class LlmWrapper:
     Wrapper for llm that integrates with Datasette's accountant system.
     """
 
-    def __init__(self, datasette, pricing_provider: Optional[PricingProvider] = None):
+    def __init__(self, datasette):
         self.datasette = datasette
         self._accountants: Optional[List[Accountant]] = None
-        self.pricing_provider = pricing_provider or DefaultPricingProvider()
+        self._pricing_provider: Optional[PricingProvider] = None
 
     def _get_accountants(self) -> List[Accountant]:
         """Get all registered accountants via the plugin hook."""
@@ -205,6 +205,27 @@ class LlmWrapper:
         self._accountants = accountants
         return accountants
 
+    def _get_pricing_provider(self) -> PricingProvider:
+        """Get the pricing provider via the plugin hook, or default."""
+        if self._pricing_provider is not None:
+            return self._pricing_provider
+
+        # Import here to avoid circular imports
+        from datasette.plugins import pm
+
+        # Use firstresult=True hook to get a single pricing provider
+        pricing_provider = pm.hook.register_llm_accountant_pricing(
+            datasette=self.datasette
+        )
+
+        # If no plugin provided a pricing provider, use default
+        if pricing_provider is None:
+            pricing_provider = DefaultPricingProvider()
+        
+        self._pricing_provider = pricing_provider
+        assert self._pricing_provider is not None
+        return self._pricing_provider
+
     def get_async_model(self, model_id: str) -> AccountedModel:
         """
         Get an async model wrapped with accounting.
@@ -217,7 +238,8 @@ class LlmWrapper:
         """
         async_model = llm.get_async_model(model_id)
         accountants = self._get_accountants()
-        return AccountedModel(async_model, accountants, self.pricing_provider)
+        pricing_provider = self._get_pricing_provider()
+        return AccountedModel(async_model, accountants, pricing_provider)
 
     def get_async_models(self):
         return llm.get_async_models()

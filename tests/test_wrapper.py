@@ -448,7 +448,64 @@ async def test_pricing_provider_model_not_found():
 
 @pytest.mark.asyncio
 async def test_llm_wrapper_with_pricing_provider():
-    """Test LlmWrapper with a custom pricing provider."""
+    """Test LlmWrapper with a custom pricing provider via plugin hook."""
+    from datasette_llm_accountant import LlmWrapper
+
+    class TestAccountantPlugin:
+        __name__ = "TestAccountantPlugin"
+
+        @hookimpl
+        def register_llm_accountants(self, datasette):
+            return [AccountantTest()]
+
+    class TestPricingPlugin:
+        __name__ = "TestPricingPlugin"
+
+        @hookimpl
+        def register_llm_accountant_pricing(self, datasette):
+            return HardcodedPricingProvider()
+
+    datasette = Datasette(memory=True)
+
+    try:
+        datasette.pm.register(TestAccountantPlugin(), name="test-accountant-plugin")
+        datasette.pm.register(TestPricingPlugin(), name="test-pricing-plugin")
+
+        # Create wrapper - should pick up the custom pricing provider
+        wrapper = LlmWrapper(datasette)
+        pricing_provider = wrapper._get_pricing_provider()
+        
+        # Verify it's using the custom pricing provider
+        assert isinstance(pricing_provider, HardcodedPricingProvider)
+        
+        # Test that it actually uses the custom pricing
+        # We can't easily test with llm.get_async_model, so we'll test the provider directly
+        pricing = pricing_provider.get_model_pricing("test-model")
+        assert pricing["input"] == 1.0
+        assert pricing["output"] == 2.0
+
+    finally:
+        datasette.pm.unregister(name="test-accountant-plugin")
+        datasette.pm.unregister(name="test-pricing-plugin")
+
+
+@pytest.mark.asyncio
+async def test_llm_wrapper_without_pricing_provider():
+    """Test LlmWrapper without a custom pricing provider (uses default)."""
+    from datasette_llm_accountant import LlmWrapper, DefaultPricingProvider
+
+    datasette = Datasette(memory=True)
+
+    wrapper = LlmWrapper(datasette)
+    pricing_provider = wrapper._get_pricing_provider()
+    
+    # Should be using the default pricing provider
+    assert isinstance(pricing_provider, DefaultPricingProvider)
+
+
+@pytest.mark.asyncio
+async def test_accounted_model_with_custom_pricing():
+    """Test that AccountedModel works with a custom pricing provider."""
     from datasette_llm_accountant import AccountedModel
 
     accountant = AccountantTest()
@@ -471,26 +528,4 @@ async def test_llm_wrapper_with_pricing_provider():
     # Cost: (100 * 1.0 + 50 * 2.0) * 100,000 = 20,000,000 nanocents
     assert len(accountant.settlements) == 1
     assert accountant.settlements[0][1] == 20_000_000
-
-
-@pytest.mark.asyncio
-async def test_accounted_model_without_pricing_provider():
-    """Test that AccountedModel works without a pricing provider (uses default)."""
-    from datasette_llm_accountant import AccountedModel
-
-    accountant = AccountantTest()
-    mock_model = create_mock_model()
-    
-    # Create AccountedModel without pricing provider
-    accounted = AccountedModel(mock_model, [accountant], pricing_provider=None)
-    
-    # Should still work using the default pricing
-    async with accounted.reserve(usd=1.0) as tx:
-        result = await tx.prompt("Test prompt")
-    
-    # Should have settled with default pricing
-    # gpt-4o-mini: input=0.15, output=0.6 per million
-    # (100 * 0.15 + 50 * 0.6) * 100,000 = 4,500,000
-    assert len(accountant.settlements) == 1
-    assert accountant.settlements[0][1] == 4_500_000
 

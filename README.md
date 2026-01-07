@@ -121,11 +121,13 @@ Costs are automatically calculated based on token usage and current pricing data
 
 ### Default Pricing Provider
 
-By default, pricing data is fetched from [simonw.github.io/llm-prices/current-v1.json](https://simonw.github.io/llm-prices/current-v1.json),.
+By default, pricing data is fetched from [simonw.github.io/llm-prices/current-v1.json](https://simonw.github.io/llm-prices/current-v1.json). 
 
-You can implement your own pricing provider to use custom pricing data, offline pricing, or any other pricing source with `PricingProvider`:
+
+You can implement your own pricing provider to use custom pricing data, offline pricing, or any other pricing source. Create a Datasette plugin that implements the `register_llm_accountant_pricing` hook:
 
 ```python
+from datasette import hookimpl
 from datasette_llm_accountant import PricingProvider, ModelPricingNotFoundError
 
 class CustomPricingProvider(PricingProvider):
@@ -160,16 +162,14 @@ class CustomPricingProvider(PricingProvider):
             )
         return self._pricing[model_id]
 
-# Use with LlmWrapper
-pricing_provider = CustomPricingProvider()
-wrapper = LlmWrapper(datasette, pricing_provider=pricing_provider)
-
-# Or directly with AccountedModel
-from datasette_llm_accountant import AccountedModel
-model = AccountedModel(async_model, accountants, pricing_provider=pricing_provider)
+@hookimpl
+def register_llm_accountant_pricing(datasette):
+    return CustomPricingProvider()
 ```
 
 The `PricingProvider` base class provides a default implementation of `calculate_cost_nanocents()` that uses your `get_model_pricing()` method, but you can override it if you need custom cost calculation logic.
+
+Only one pricing provider can be active at a time. If multiple plugins register pricing providers, only the first one will be used.
 
 ## API Reference
 
@@ -180,7 +180,7 @@ wrapper = LlmWrapper(datasette)
 model = wrapper.get_async_model("model-id")
 ```
 
-Optional `pricing_provider` parameter allows you to specify a custom pricing provider. If not provided, uses the default provider that fetches pricing from the remote endpoint.
+The wrapper automatically discovers accountants and pricing providers via Datasette's plugin system.
 
 ### AccountedModel
 
@@ -191,6 +191,42 @@ response = await model.prompt("text", usd=0.5)
 # Manual reservation
 async with model.reserve(usd=1.0) as tx:
     response = await tx.prompt("text")
+```
+
+### Plugin Hooks
+
+#### register_llm_accountants
+
+Register accountants to track and limit LLM spending:
+
+```python
+from datasette import hookimpl
+from datasette_llm_accountant import Accountant, Tx
+
+class MyAccountant(Accountant):
+    async def reserve(self, nanocents: int) -> Tx: ...
+    async def settle(self, tx: Tx, nanocents: int): ...
+    async def rollback(self, tx: Tx): ...
+
+@hookimpl
+def register_llm_accountants(datasette):
+    return [MyAccountant()]
+```
+
+#### register_llm_accountant_pricing
+
+Register a custom pricing provider (only the first one is used):
+
+```python
+from datasette import hookimpl
+from datasette_llm_accountant import PricingProvider
+
+class MyPricingProvider(PricingProvider):
+    def get_model_pricing(self, model_id: str) -> dict: ...
+
+@hookimpl
+def register_llm_accountant_pricing(datasette):
+    return MyPricingProvider()
 ```
 
 ### PricingProvider Base Class
