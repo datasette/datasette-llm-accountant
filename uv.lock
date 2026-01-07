@@ -168,7 +168,7 @@ dependencies = [
     { name = "llm" },
 ]
 
-[package.optional-dependencies]
+[package.dev-dependencies]
 dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -180,11 +180,14 @@ requires-dist = [
     { name = "datasette", specifier = ">=1.0a21" },
     { name = "httpx" },
     { name = "llm" },
-    { name = "pytest", marker = "extra == 'dev'" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'" },
-    { name = "sqlite-utils", marker = "extra == 'dev'" },
 ]
-provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "sqlite-utils" },
+]
 
 [[package]]
 name = "distro"
