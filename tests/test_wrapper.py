@@ -529,3 +529,44 @@ async def test_accounted_model_with_custom_pricing():
     assert len(accountant.settlements) == 1
     assert accountant.settlements[0][1] == 20_000_000
 
+
+def test_get_async_models_filters_by_pricing():
+    """Test that get_async_models only returns models with pricing info."""
+    from datasette_llm_accountant import LlmWrapper
+    from unittest.mock import patch, Mock
+
+    class TestPricingPlugin:
+        __name__ = "TestPricingPlugin"
+
+        @hookimpl
+        def register_llm_accountant_pricing(self, datasette):
+            return HardcodedPricingProvider()
+
+    datasette = Datasette(memory=True)
+
+    try:
+        datasette.pm.register(TestPricingPlugin(), name="test-pricing-plugin")
+
+        # Mock llm.get_async_models to return some test models
+        mock_model1 = Mock()
+        mock_model1.model_id = "gpt-4o-mini"  # Has pricing in HardcodedPricingProvider
+        
+        mock_model2 = Mock()
+        mock_model2.model_id = "test-model"  # Has pricing in HardcodedPricingProvider
+        
+        mock_model3 = Mock()
+        mock_model3.model_id = "unknown-model"  # Does NOT have pricing
+        
+        with patch('llm.get_async_models', return_value=[mock_model1, mock_model2, mock_model3]):
+            wrapper = LlmWrapper(datasette)
+            models = list(wrapper.get_async_models())
+            
+            # Should only return models with pricing information
+            assert len(models) == 2
+            assert models[0].model_id == "gpt-4o-mini"
+            assert models[1].model_id == "test-model"
+
+    finally:
+        datasette.pm.unregister(name="test-pricing-plugin")
+
+

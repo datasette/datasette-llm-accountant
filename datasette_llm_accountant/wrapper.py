@@ -242,4 +242,21 @@ class LlmWrapper:
         return AccountedModel(async_model, accountants, pricing_provider)
 
     def get_async_models(self):
-        return llm.get_async_models()
+        """
+        Get all async models that have pricing information available.
+        
+        Returns:
+            Generator of async models that can be used with accounting.
+        """
+        from .pricing import ModelPricingNotFoundError
+        
+        pricing_provider = self._get_pricing_provider()
+        
+        for model in llm.get_async_models():
+            # Only include models that have pricing information
+            try:
+                pricing_provider.get_model_pricing(model.model_id)
+                yield model
+            except ModelPricingNotFoundError:
+                # Skip models without pricing data
+                continue

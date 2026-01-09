@@ -34,6 +34,18 @@ model = llm.get_async_model("gpt-4o-mini")
 response = await model.prompt("Write a poem about a pirate")
 ```
 
+### Discovering Available Models
+
+You can get a list of all available models that have pricing information:
+
+```python
+# Only returns models with pricing data
+for model in llm.get_async_models():
+    print(f"Model: {model.model_id}")
+```
+
+Models without pricing information are automatically filtered out to prevent runtime errors when calculating costs.
+
 ### Manual Reservations
 
 You can manually reserve an amount and track spending across multiple prompts:
@@ -181,6 +193,11 @@ model = wrapper.get_async_model("model-id")
 ```
 
 The wrapper automatically discovers accountants and pricing providers via Datasette's plugin system.
+
+**Methods:**
+
+- `get_async_model(model_id: str) -> AccountedModel` - Get a specific model wrapped with accounting
+- `get_async_models()` - Generator that yields all async models with pricing information available (filters out models without pricing data)
 
 ### AccountedModel
 
