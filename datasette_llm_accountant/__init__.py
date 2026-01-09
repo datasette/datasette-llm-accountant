@@ -10,6 +10,8 @@ pm.add_hookspecs(hookspecs)
 from .wrapper import LlmWrapper, AccountedModel, AccountedTransaction
 from .accountant import Accountant, Tx, InsufficientBalanceError
 from .pricing import (
+    PricingProvider,
+    DefaultPricingProvider,
     calculate_cost_nanocents,
     get_model_pricing,
     usd_to_nanocents,
@@ -24,6 +26,8 @@ __all__ = [
     "Accountant",
     "Tx",
     "InsufficientBalanceError",
+    "PricingProvider",
+    "DefaultPricingProvider",
     "calculate_cost_nanocents",
     "get_model_pricing",
     "usd_to_nanocents",

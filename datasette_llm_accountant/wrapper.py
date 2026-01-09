@@ -5,7 +5,7 @@ LLM wrapper with accounting support.
 import llm
 from typing import Optional, List
 from .accountant import Accountant, Tx, InsufficientBalanceError
-from .pricing import usd_to_nanocents, calculate_cost_nanocents
+from .pricing import PricingProvider, DefaultPricingProvider
 
 
 class ReservationExceededError(Exception):
@@ -32,6 +32,7 @@ class AccountedTransaction:
         self.accountants = accountants
         self.transactions: List[tuple[Accountant, Tx]] = []
         self.spent_nanocents = 0
+        self.pricing_provider = model.pricing_provider
 
     async def __aenter__(self):
         """Reserve from all accountants, rolling back on failure."""
@@ -92,7 +93,8 @@ class AccountedTransaction:
         usage = await response.usage()
         model_id = self.model._async_model.model_id
 
-        cost_nanocents = calculate_cost_nanocents(
+        # Use pricing provider to calculate cost
+        cost_nanocents = self.pricing_provider.calculate_cost_nanocents(
             model_id,
             input_tokens=usage.input or 0,
             output_tokens=usage.output or 0,
@@ -118,9 +120,11 @@ class AccountedModel:
         self,
         async_model: llm.models.AsyncModel,
         accountants: List[Accountant],
+        pricing_provider: Optional[PricingProvider] = None,
     ):
         self._async_model = async_model
         self._accountants = accountants
+        self.pricing_provider = pricing_provider or DefaultPricingProvider()
 
     def reserve(
         self, usd: Optional[float] = None, nanocents: Optional[int] = None
@@ -143,8 +147,11 @@ class AccountedModel:
             raise ValueError("Must specify exactly one of usd or nanocents")
 
         if usd is not None:
-            nanocents = usd_to_nanocents(usd)
-
+            # Convert USD to nanocents: 1 USD = 100 cents = 100,000,000,000 nanocents
+            nanocents = int(usd * 100_000_000_000)
+        
+        # At this point nanocents is guaranteed to be int
+        assert nanocents is not None
         return AccountedTransaction(self, nanocents, self._accountants)
 
     async def prompt(self, prompt_text: str, usd: float = 0.5, **kwargs) -> llm.AsyncResponse:
@@ -175,6 +182,7 @@ class LlmWrapper:
     def __init__(self, datasette):
         self.datasette = datasette
         self._accountants: Optional[List[Accountant]] = None
+        self._pricing_provider: Optional[PricingProvider] = None
 
     def _get_accountants(self) -> List[Accountant]:
         """Get all registered accountants via the plugin hook."""
@@ -197,6 +205,27 @@ class LlmWrapper:
         self._accountants = accountants
         return accountants
 
+    def _get_pricing_provider(self) -> PricingProvider:
+        """Get the pricing provider via the plugin hook, or default."""
+        if self._pricing_provider is not None:
+            return self._pricing_provider
+
+        # Import here to avoid circular imports
+        from datasette.plugins import pm
+
+        # Use firstresult=True hook to get a single pricing provider
+        pricing_provider = pm.hook.register_llm_accountant_pricing(
+            datasette=self.datasette
+        )
+
+        # If no plugin provided a pricing provider, use default
+        if pricing_provider is None:
+            pricing_provider = DefaultPricingProvider()
+        
+        self._pricing_provider = pricing_provider
+        assert self._pricing_provider is not None
+        return self._pricing_provider
+
     def get_async_model(self, model_id: str) -> AccountedModel:
         """
         Get an async model wrapped with accounting.
@@ -209,7 +238,25 @@ class LlmWrapper:
         """
         async_model = llm.get_async_model(model_id)
         accountants = self._get_accountants()
-        return AccountedModel(async_model, accountants)
+        pricing_provider = self._get_pricing_provider()
+        return AccountedModel(async_model, accountants, pricing_provider)
 
     def get_async_models(self):
-        return llm.get_async_models()
+        """
+        Get all async models that have pricing information available.
+        
+        Returns:
+            Generator of async models that can be used with accounting.
+        """
+        from .pricing import ModelPricingNotFoundError
+        
+        pricing_provider = self._get_pricing_provider()
+        
+        for model in llm.get_async_models():
+            # Only include models that have pricing information
+            try:
+                pricing_provider.get_model_pricing(model.model_id)
+                yield model
+            except ModelPricingNotFoundError:
+                # Skip models without pricing data
+                continue

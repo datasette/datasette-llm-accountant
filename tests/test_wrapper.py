@@ -11,8 +11,44 @@ from datasette_llm_accountant import (
     Accountant,
     Tx,
     InsufficientBalanceError,
+    PricingProvider,
+    ModelPricingNotFoundError,
 )
 from datasette_llm_accountant.wrapper import ReservationExceededError
+
+
+class HardcodedPricingProvider(PricingProvider):
+    """Test pricing provider with hardcoded pricing data."""
+
+    def __init__(self):
+        # Hardcoded pricing for testing
+        self._pricing = {
+            "gpt-4o-mini": {
+                "id": "gpt-4o-mini",
+                "vendor": "openai",
+                "name": "GPT-4o mini",
+                "input": 0.15,  # USD per million tokens
+                "output": 0.6,   # USD per million tokens
+                "input_cached": None,
+            },
+            "test-model": {
+                "id": "test-model",
+                "vendor": "test",
+                "name": "Test Model",
+                "input": 1.0,   # USD per million tokens
+                "output": 2.0,  # USD per million tokens
+                "input_cached": 0.5,  # USD per million tokens
+            },
+        }
+
+    def get_model_pricing(self, model_id: str) -> dict:
+        """Get pricing information for a specific model."""
+        if model_id not in self._pricing:
+            raise ModelPricingNotFoundError(
+                f"Pricing not found for model '{model_id}'. "
+                f"Available models: {', '.join(sorted(self._pricing.keys()))}"
+            )
+        return self._pricing[model_id]
 
 
 class AccountantTest(Accountant):
@@ -331,3 +367,206 @@ async def test_reserve_validation():
     with pytest.raises(ValueError) as exc_info:
         accounted.reserve(usd=1.0, nanocents=100_000_000_000)
     assert "exactly one" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_custom_pricing_provider():
+    """Test using a custom pricing provider with AccountedModel."""
+    from datasette_llm_accountant import AccountedModel
+
+    accountant = AccountantTest()
+    pricing_provider = HardcodedPricingProvider()
+    
+    # Create a mock model with test-model id
+    mock_model = create_mock_model(model_id="test-model")
+    
+    # Create AccountedModel with custom pricing provider
+    accounted = AccountedModel(mock_model, [accountant], pricing_provider)
+    
+    # Reserve and prompt
+    async with accounted.reserve(usd=1.0) as tx:
+        result = await tx.prompt("Test prompt")
+    
+    # Check settlement cost
+    # test-model pricing: input=1.0, output=2.0 per million tokens
+    # 100 input + 50 output tokens
+    # Cost: (100 * 1.0 + 50 * 2.0) * 100,000 = 20,000,000 nanocents
+    assert len(accountant.settlements) == 1
+    assert accountant.settlements[0][1] == 20_000_000
+
+
+@pytest.mark.asyncio
+async def test_custom_pricing_provider_with_cached_tokens():
+    """Test custom pricing provider with cached input tokens."""
+    from datasette_llm_accountant import AccountedModel
+
+    accountant = AccountantTest()
+    pricing_provider = HardcodedPricingProvider()
+    
+    # Create a mock response with cached tokens (requires updating usage)
+    response = AsyncMock()
+    response.text = AsyncMock(return_value="Mock response text")
+    usage = Mock()
+    usage.input = 100
+    usage.output = 50
+    # Note: LLM library doesn't expose cached tokens in usage yet,
+    # but the pricing provider supports it
+    response.usage = AsyncMock(return_value=usage)
+    
+    mock_model = create_mock_model(model_id="test-model", responses=[response])
+    accounted = AccountedModel(mock_model, [accountant], pricing_provider)
+    
+    async with accounted.reserve(usd=1.0) as tx:
+        result = await tx.prompt("Test prompt")
+    
+    # Should use regular pricing (no cached tokens in usage)
+    assert accountant.settlements[0][1] == 20_000_000
+
+
+@pytest.mark.asyncio
+async def test_pricing_provider_model_not_found():
+    """Test that custom pricing provider raises error for unknown models."""
+    from datasette_llm_accountant import AccountedModel
+
+    accountant = AccountantTest()
+    pricing_provider = HardcodedPricingProvider()
+    
+    # Create model with unknown id
+    mock_model = create_mock_model(model_id="unknown-model")
+    accounted = AccountedModel(mock_model, [accountant], pricing_provider)
+    
+    # Should raise ModelPricingNotFoundError when trying to calculate cost
+    with pytest.raises(ModelPricingNotFoundError) as exc_info:
+        async with accounted.reserve(usd=1.0) as tx:
+            await tx.prompt("Test prompt")
+    
+    assert "unknown-model" in str(exc_info.value)
+    
+    # Should have rolled back the reservation
+    assert len(accountant.rollbacks) == 1
+
+
+@pytest.mark.asyncio
+async def test_llm_wrapper_with_pricing_provider():
+    """Test LlmWrapper with a custom pricing provider via plugin hook."""
+    from datasette_llm_accountant import LlmWrapper
+
+    class TestAccountantPlugin:
+        __name__ = "TestAccountantPlugin"
+
+        @hookimpl
+        def register_llm_accountants(self, datasette):
+            return [AccountantTest()]
+
+    class TestPricingPlugin:
+        __name__ = "TestPricingPlugin"
+
+        @hookimpl
+        def register_llm_accountant_pricing(self, datasette):
+            return HardcodedPricingProvider()
+
+    datasette = Datasette(memory=True)
+
+    try:
+        datasette.pm.register(TestAccountantPlugin(), name="test-accountant-plugin")
+        datasette.pm.register(TestPricingPlugin(), name="test-pricing-plugin")
+
+        # Create wrapper - should pick up the custom pricing provider
+        wrapper = LlmWrapper(datasette)
+        pricing_provider = wrapper._get_pricing_provider()
+        
+        # Verify it's using the custom pricing provider
+        assert isinstance(pricing_provider, HardcodedPricingProvider)
+        
+        # Test that it actually uses the custom pricing
+        # We can't easily test with llm.get_async_model, so we'll test the provider directly
+        pricing = pricing_provider.get_model_pricing("test-model")
+        assert pricing["input"] == 1.0
+        assert pricing["output"] == 2.0
+
+    finally:
+        datasette.pm.unregister(name="test-accountant-plugin")
+        datasette.pm.unregister(name="test-pricing-plugin")
+
+
+@pytest.mark.asyncio
+async def test_llm_wrapper_without_pricing_provider():
+    """Test LlmWrapper without a custom pricing provider (uses default)."""
+    from datasette_llm_accountant import LlmWrapper, DefaultPricingProvider
+
+    datasette = Datasette(memory=True)
+
+    wrapper = LlmWrapper(datasette)
+    pricing_provider = wrapper._get_pricing_provider()
+    
+    # Should be using the default pricing provider
+    assert isinstance(pricing_provider, DefaultPricingProvider)
+
+
+@pytest.mark.asyncio
+async def test_accounted_model_with_custom_pricing():
+    """Test that AccountedModel works with a custom pricing provider."""
+    from datasette_llm_accountant import AccountedModel
+
+    accountant = AccountantTest()
+    pricing_provider = HardcodedPricingProvider()
+    
+    # Create an AccountedModel directly with the pricing provider
+    mock_model = create_mock_model(model_id="test-model")
+    
+    accounted = AccountedModel(mock_model, [accountant], pricing_provider=pricing_provider)
+    
+    # Verify the pricing provider is set
+    assert accounted.pricing_provider is pricing_provider
+    
+    # Test that it uses the custom pricing provider
+    async with accounted.reserve(usd=1.0) as tx:
+        result = await tx.prompt("Test prompt")
+    
+    # With test-model pricing (input=1.0, output=2.0 per million tokens)
+    # For 100 input + 50 output tokens:
+    # Cost: (100 * 1.0 + 50 * 2.0) * 100,000 = 20,000,000 nanocents
+    assert len(accountant.settlements) == 1
+    assert accountant.settlements[0][1] == 20_000_000
+
+
+def test_get_async_models_filters_by_pricing():
+    """Test that get_async_models only returns models with pricing info."""
+    from datasette_llm_accountant import LlmWrapper
+    from unittest.mock import patch, Mock
+
+    class TestPricingPlugin:
+        __name__ = "TestPricingPlugin"
+
+        @hookimpl
+        def register_llm_accountant_pricing(self, datasette):
+            return HardcodedPricingProvider()
+
+    datasette = Datasette(memory=True)
+
+    try:
+        datasette.pm.register(TestPricingPlugin(), name="test-pricing-plugin")
+
+        # Mock llm.get_async_models to return some test models
+        mock_model1 = Mock()
+        mock_model1.model_id = "gpt-4o-mini"  # Has pricing in HardcodedPricingProvider
+        
+        mock_model2 = Mock()
+        mock_model2.model_id = "test-model"  # Has pricing in HardcodedPricingProvider
+        
+        mock_model3 = Mock()
+        mock_model3.model_id = "unknown-model"  # Does NOT have pricing
+        
+        with patch('llm.get_async_models', return_value=[mock_model1, mock_model2, mock_model3]):
+            wrapper = LlmWrapper(datasette)
+            models = list(wrapper.get_async_models())
+            
+            # Should only return models with pricing information
+            assert len(models) == 2
+            assert models[0].model_id == "gpt-4o-mini"
+            assert models[1].model_id == "test-model"
+
+    finally:
+        datasette.pm.unregister(name="test-pricing-plugin")
+
+

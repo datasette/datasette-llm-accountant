@@ -34,6 +34,18 @@ model = llm.get_async_model("gpt-4o-mini")
 response = await model.prompt("Write a poem about a pirate")
 ```
 
+### Discovering Available Models
+
+You can get a list of all available models that have pricing information:
+
+```python
+# Only returns models with pricing data
+for model in llm.get_async_models():
+    print(f"Model: {model.model_id}")
+```
+
+Models without pricing information are automatically filtered out to prevent runtime errors when calculating costs.
+
 ### Manual Reservations
 
 You can manually reserve an amount and track spending across multiple prompts:
@@ -119,6 +131,58 @@ Costs are automatically calculated based on token usage and current pricing data
 - Converts costs to nanocents for precise accounting
 - Works with 80+ models across multiple providers
 
+### Default Pricing Provider
+
+By default, pricing data is fetched from [simonw.github.io/llm-prices/current-v1.json](https://simonw.github.io/llm-prices/current-v1.json). 
+
+
+You can implement your own pricing provider to use custom pricing data, offline pricing, or any other pricing source. Create a Datasette plugin that implements the `register_llm_accountant_pricing` hook:
+
+```python
+from datasette import hookimpl
+from datasette_llm_accountant import PricingProvider, ModelPricingNotFoundError
+
+class CustomPricingProvider(PricingProvider):
+    """Custom pricing provider with your own pricing data."""
+    
+    def __init__(self):
+        # Your custom pricing data
+        self._pricing = {
+            "gpt-4o-mini": {
+                "id": "gpt-4o-mini",
+                "vendor": "openai",
+                "name": "GPT-4o mini",
+                "input": 0.15,   # USD per million tokens
+                "output": 0.6,   # USD per million tokens
+                "input_cached": None,
+            },
+            "my-custom-model": {
+                "id": "my-custom-model",
+                "vendor": "custom",
+                "name": "My Custom Model",
+                "input": 1.0,
+                "output": 2.0,
+                "input_cached": 0.5,
+            },
+        }
+    
+    def get_model_pricing(self, model_id: str) -> dict:
+        """Get pricing information for a specific model."""
+        if model_id not in self._pricing:
+            raise ModelPricingNotFoundError(
+                f"Pricing not found for model '{model_id}'"
+            )
+        return self._pricing[model_id]
+
+@hookimpl
+def register_llm_accountant_pricing(datasette):
+    return CustomPricingProvider()
+```
+
+The `PricingProvider` base class provides a default implementation of `calculate_cost_nanocents()` that uses your `get_model_pricing()` method, but you can override it if you need custom cost calculation logic.
+
+Only one pricing provider can be active at a time. If multiple plugins register pricing providers, only the first one will be used.
+
 ## API Reference
 
 ### LlmWrapper
@@ -127,6 +191,13 @@ Costs are automatically calculated based on token usage and current pricing data
 wrapper = LlmWrapper(datasette)
 model = wrapper.get_async_model("model-id")
 ```
+
+The wrapper automatically discovers accountants and pricing providers via Datasette's plugin system.
+
+**Methods:**
+
+- `get_async_model(model_id: str) -> AccountedModel` - Get a specific model wrapped with accounting
+- `get_async_models()` - Generator that yields all async models with pricing information available (filters out models without pricing data)
 
 ### AccountedModel
 
@@ -137,6 +208,64 @@ response = await model.prompt("text", usd=0.5)
 # Manual reservation
 async with model.reserve(usd=1.0) as tx:
     response = await tx.prompt("text")
+```
+
+### Plugin Hooks
+
+#### register_llm_accountants
+
+Register accountants to track and limit LLM spending:
+
+```python
+from datasette import hookimpl
+from datasette_llm_accountant import Accountant, Tx
+
+class MyAccountant(Accountant):
+    async def reserve(self, nanocents: int) -> Tx: ...
+    async def settle(self, tx: Tx, nanocents: int): ...
+    async def rollback(self, tx: Tx): ...
+
+@hookimpl
+def register_llm_accountants(datasette):
+    return [MyAccountant()]
+```
+
+#### register_llm_accountant_pricing
+
+Register a custom pricing provider (only the first one is used):
+
+```python
+from datasette import hookimpl
+from datasette_llm_accountant import PricingProvider
+
+class MyPricingProvider(PricingProvider):
+    def get_model_pricing(self, model_id: str) -> dict: ...
+
+@hookimpl
+def register_llm_accountant_pricing(datasette):
+    return MyPricingProvider()
+```
+
+### PricingProvider Base Class
+
+```python
+from datasette_llm_accountant import PricingProvider
+
+class CustomPricingProvider(PricingProvider):
+    def get_model_pricing(self, model_id: str) -> dict:
+        """
+        Return dict with keys: id, vendor, name, input, output, input_cached.
+        Pricing values are in USD per million tokens.
+        Raise ModelPricingNotFoundError if model not found.
+        """
+        ...
+    
+    # Optional: override if you need custom cost calculation
+    def calculate_cost_nanocents(
+        self, model_id: str, input_tokens: int, 
+        output_tokens: int, cached_input_tokens: int = 0
+    ) -> int:
+        ...
 ```
 
 ### Accountant Base Class

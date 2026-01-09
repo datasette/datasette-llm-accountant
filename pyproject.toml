@@ -28,9 +28,10 @@ CI = "https://github.com/datasette/datasette-llm-accountant/actions"
 [project.entry-points.datasette]
 llm_accountant = "datasette_llm_accountant"
 
-[project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio", "sqlite-utils"]
-
+[dependency-groups]
+dev = [
+    "pytest", "pytest-asyncio", "sqlite-utils"
+]
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
