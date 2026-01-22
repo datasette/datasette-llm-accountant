@@ -16,6 +16,14 @@ dependencies = [
     "httpx"
 ]
 
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "sqlite-utils",
+    "llm-echo"
+]
+
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
@@ -28,9 +36,6 @@ CI = "https://github.com/datasette/datasette-llm-accountant/actions"
 
 [project.entry-points.datasette]
 llm_accountant = "datasette_llm_accountant"
-
-[project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio", "sqlite-utils", "llm-echo"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
