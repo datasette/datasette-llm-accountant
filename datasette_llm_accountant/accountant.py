@@ -30,12 +30,19 @@ class Accountant(ABC):
     """
 
     @abstractmethod
-    async def reserve(self, nanocents: int) -> Tx:
+    async def reserve(
+        self,
+        nanocents: int,
+        model_id: str = None,
+        purpose: str = None,
+    ) -> Tx:
         """
         Reserve the specified amount in nanocents.
 
         Args:
             nanocents: Amount to reserve in nanocents (1/1,000,000,000 of a cent)
+            model_id: The model being used (e.g., "gpt-4o-mini")
+            purpose: The purpose of the request (e.g., "query-assistant")
 
         Returns:
             A transaction ID that will be used for settlement
@@ -46,13 +53,21 @@ class Accountant(ABC):
         pass
 
     @abstractmethod
-    async def settle(self, tx: Tx, nanocents: int):
+    async def settle(
+        self,
+        tx: Tx,
+        nanocents: int,
+        model_id: str = None,
+        purpose: str = None,
+    ):
         """
         Settle a transaction for the actual amount spent.
 
         Args:
             tx: Transaction ID returned from reserve()
             nanocents: Actual amount spent in nanocents
+            model_id: The model that was used
+            purpose: The purpose of the request
         """
         pass
 

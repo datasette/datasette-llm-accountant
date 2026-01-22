@@ -1,6 +1,7 @@
 """
 Tests for pricing lookup and cost calculation.
 """
+
 import pytest
 from datasette_llm_accountant import (
     get_model_pricing,
@@ -85,7 +86,10 @@ def test_calculate_cost_with_model_without_cached_pricing():
     )
 
     cost_with_cached = calculate_cost_nanocents(
-        "claude-3.5-sonnet", input_tokens=1000, output_tokens=500, cached_input_tokens=500
+        "claude-3.5-sonnet",
+        input_tokens=1000,
+        output_tokens=500,
+        cached_input_tokens=500,
     )
 
     # Should be different because cached tokens are treated as uncached
