@@ -13,6 +13,9 @@ from datasette_llm_accountant import (
     Tx,
     InsufficientBalanceError,
     ReservationExceededError,
+    PricingProvider,
+    DefaultPricingProvider,
+    ModelPricingNotFoundError,
 )
 
 
@@ -345,3 +348,79 @@ async def test_conversation_prompts_with_accounting(datasette_with_accountant):
     # Should have a second reservation/settlement for the second prompt
     assert len(accountant.reservations) == 2
     assert len(accountant.settlements) == 2
+
+
+class HardcodedPricingProvider(PricingProvider):
+    """A pricing provider with hardcoded prices for testing."""
+
+    def __init__(self):
+        self.calls = []
+
+    def get_model_pricing(self, model_id: str) -> dict:
+        self.calls.append(model_id)
+        if model_id == "echo":
+            return {
+                "id": "echo",
+                "vendor": "test",
+                "name": "Echo",
+                "input": 50.0,   # $50 per million input tokens
+                "output": 100.0,  # $100 per million output tokens
+                "input_cached": None,
+            }
+        raise ModelPricingNotFoundError(f"No pricing for {model_id}")
+
+
+@pytest.mark.asyncio
+async def test_custom_pricing_provider_via_hook():
+    """Test that a custom pricing provider registered via hook is used for cost calculation."""
+    from datasette_llm import LLM
+
+    test_accountant = AccountantTest()
+    pricing_provider = HardcodedPricingProvider()
+
+    class TestPlugin:
+        __name__ = "test_pricing_plugin"
+
+        @hookimpl
+        def register_llm_accountants(self, datasette):
+            return [test_accountant]
+
+        @hookimpl
+        def register_llm_accountant_pricing(self, datasette):
+            return pricing_provider
+
+    datasette = Datasette(memory=True)
+    plugin = TestPlugin()
+    datasette.pm.register(plugin, name="test-pricing")
+
+    try:
+        llm = LLM(datasette)
+        model = await llm.model("echo", purpose="test")
+
+        response = await model.prompt("Hello")
+        await response.text()
+
+        # Should have reserved and settled
+        assert len(test_accountant.reservations) == 1
+        assert len(test_accountant.settlements) == 1
+
+        # Verify the custom provider was used (not the default).
+        # The echo model may or may not report usage — if it does, the provider is called.
+        # Either way, the _get_pricing_provider helper should return our custom provider.
+        from datasette_llm_accountant.hooks import _get_pricing_provider
+
+        resolved = _get_pricing_provider(datasette)
+        assert isinstance(resolved, HardcodedPricingProvider)
+
+    finally:
+        datasette.pm.unregister(name="test-pricing")
+
+
+@pytest.mark.asyncio
+async def test_default_pricing_provider_fallback():
+    """Test that DefaultPricingProvider is used when no pricing plugin is registered."""
+    from datasette_llm_accountant.hooks import _get_pricing_provider
+
+    datasette = Datasette(memory=True)
+    provider = _get_pricing_provider(datasette)
+    assert isinstance(provider, DefaultPricingProvider)

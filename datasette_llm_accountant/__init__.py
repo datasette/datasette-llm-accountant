@@ -10,6 +10,8 @@ from . import hooks
 from .accountant import Accountant, Tx, InsufficientBalanceError
 from .hooks import ReservationExceededError, GroupReservation
 from .pricing import (
+    PricingProvider,
+    DefaultPricingProvider,
     calculate_cost_nanocents,
     get_model_pricing,
     usd_to_nanocents,
@@ -24,6 +26,9 @@ __all__ = [
     "InsufficientBalanceError",
     # Errors
     "ReservationExceededError",
+    # Pricing providers
+    "PricingProvider",
+    "DefaultPricingProvider",
     # Pricing utilities
     "calculate_cost_nanocents",
     "get_model_pricing",

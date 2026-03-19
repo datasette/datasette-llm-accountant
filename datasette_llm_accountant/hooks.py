@@ -13,6 +13,8 @@ from datasette.plugins import pm
 
 from .accountant import Accountant, Tx, InsufficientBalanceError
 from .pricing import (
+    DefaultPricingProvider,
+    PricingProvider,
     calculate_cost_nanocents,
     usd_to_nanocents,
     ModelPricingNotFoundError,
@@ -111,6 +113,14 @@ def _get_accountants(datasette) -> List[Accountant]:
     return accountants
 
 
+def _get_pricing_provider(datasette) -> PricingProvider:
+    """Get the pricing provider via the plugin hook, or default."""
+    result = pm.hook.register_llm_accountant_pricing(datasette=datasette)
+    if result is not None:
+        return result
+    return DefaultPricingProvider()
+
+
 def _get_config(datasette) -> dict:
     """Get plugin configuration."""
     return datasette.plugin_config("datasette-llm-accountant") or {}
@@ -161,6 +171,8 @@ def llm_prompt_context(datasette, model_id, prompt, purpose):
         # No accountants registered, just pass through
         return None
 
+    provider = _get_pricing_provider(datasette)
+
     @asynccontextmanager
     async def accounting_wrapper(result):
         group = result.group
@@ -190,7 +202,7 @@ def llm_prompt_context(datasette, model_id, prompt, purpose):
                 async def track_group_usage(response):
                     try:
                         usage = await response.usage()
-                        cost = calculate_cost_nanocents(
+                        cost = provider.calculate_cost_nanocents(
                             model_id,
                             input_tokens=usage.input or 0,
                             output_tokens=usage.output or 0,
@@ -234,7 +246,7 @@ def llm_prompt_context(datasette, model_id, prompt, purpose):
                     async def track_and_settle(response):
                         try:
                             usage = await response.usage()
-                            cost = calculate_cost_nanocents(
+                            cost = provider.calculate_cost_nanocents(
                                 model_id,
                                 input_tokens=usage.input or 0,
                                 output_tokens=usage.output or 0,
