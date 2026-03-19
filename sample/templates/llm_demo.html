@@ -1,0 +1,196 @@
+{% extends "base.html" %}
+
+{% block title %}LLM Demo{% endblock %}
+
+{% block content %}
+<style>
+.llm-demo { max-width: 800px; margin: 0 auto; }
+.llm-demo h2 { font-size: 18px; margin: 24px 0 12px; border-bottom: 1px solid #ddd; padding-bottom: 6px; }
+.llm-demo table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+.llm-demo th, .llm-demo td { padding: 6px 10px; text-align: left; border-bottom: 1px solid #eee; }
+.llm-demo th { font-size: 12px; text-transform: uppercase; color: #666; }
+.llm-demo td.mono { font-family: monospace; }
+.llm-demo .warn { color: #a60; }
+.llm-demo .danger { color: #c00; }
+.llm-demo .inline-form { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 16px; }
+.llm-demo .field { display: flex; flex-direction: column; }
+.llm-demo .field label { font-size: 12px; color: #555; margin-bottom: 2px; }
+.llm-demo .field input, .llm-demo .field select { padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+.llm-demo .field textarea { padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; font-family: inherit; min-height: 100px; resize: vertical; width: 100%; box-sizing: border-box; }
+.llm-demo button { padding: 6px 14px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
+.llm-demo .btn-primary { background: #4a90d9; color: white; }
+.llm-demo .btn-primary:disabled { background: #a0c4e8; cursor: default; }
+.llm-demo .btn-danger { background: #d9534f; color: white; font-size: 12px; padding: 4px 10px; }
+.llm-demo .btn-reset { background: #f0ad4e; color: white; font-size: 12px; padding: 4px 10px; }
+.llm-demo .response-box { background: #f7f7f7; border: 1px solid #ddd; border-radius: 6px; padding: 16px; margin-top: 16px; white-space: pre-wrap; line-height: 1.5; }
+.llm-demo .response-box.error { background: #fff0f0; border-color: #e88; color: #a00; }
+.llm-demo .meta { font-size: 12px; color: #888; margin-top: 8px; }
+.llm-demo .actor-info { font-size: 13px; color: #666; margin-bottom: 16px; padding: 8px 12px; background: #f0f4f8; border-radius: 4px; }
+.llm-demo .muted { color: #888; }
+</style>
+
+<div class="llm-demo">
+
+<h1>LLM Demo</h1>
+<div class="actor-info">Actor: <strong>{{ actor_id }}</strong></div>
+
+<h2>Budgets</h2>
+
+<div class="inline-form">
+    <div class="field">
+        <label for="budget_actor_id">Actor</label>
+        <select id="budget_actor_id">
+            {% for a in actors %}
+            <option value="{{ a.id }}">{{ a.name }} ({{ a.id }})</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="field">
+        <label for="budget_usd">Budget (USD)</label>
+        <input id="budget_usd" type="number" step="0.01" min="0" placeholder="1.00" style="width: 100px;">
+    </div>
+    <button class="btn-primary" id="btn-set-budget">Set Budget</button>
+</div>
+
+<div id="budgets-table"></div>
+
+<h2>Prompt</h2>
+
+<div class="field" style="margin-bottom: 10px;">
+    <label for="model">Model</label>
+    <select id="model"><option>Loading...</option></select>
+</div>
+<div class="field" style="margin-bottom: 10px;">
+    <label for="prompt">Prompt</label>
+    <textarea id="prompt" placeholder="Ask something..."></textarea>
+</div>
+<button class="btn-primary" id="btn-send">Send</button>
+
+<div id="prompt-result"></div>
+
+</div>
+
+<script>
+(function() {
+    var API = '/-/llm-demo/api';
+
+    function post(url, data) {
+        return fetch(API + url, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data),
+        }).then(function(r) { return r.json(); });
+    }
+
+    function fmt(v) { return '$' + Number(v).toFixed(4); }
+
+    function esc(s) {
+        var d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+    }
+
+    // --- Budgets ---
+    function loadBudgets() {
+        fetch(API + '/budgets').then(function(r) { return r.json(); }).then(function(data) {
+            var el = document.getElementById('budgets-table');
+            var budgets = data.budgets || [];
+            if (!budgets.length) {
+                el.innerHTML = '<p class="muted">No budgets configured yet.</p>';
+                return;
+            }
+            var html = '<table><thead><tr><th>Actor</th><th>Spent</th><th>Budget</th><th>Remaining</th><th></th></tr></thead><tbody>';
+            budgets.forEach(function(b) {
+                var pct = b.budget_usd > 0 ? (b.spent_usd / b.budget_usd * 100) : 0;
+                var cls = pct > 80 ? 'danger' : pct > 50 ? 'warn' : '';
+                html += '<tr>'
+                    + '<td>' + esc(b.actor_id) + '</td>'
+                    + '<td class="mono ' + cls + '">' + fmt(b.spent_usd) + '</td>'
+                    + '<td class="mono">' + fmt(b.budget_usd) + '</td>'
+                    + '<td class="mono ' + cls + '">' + fmt(b.remaining_usd) + '</td>'
+                    + '<td style="white-space:nowrap">'
+                    + '<button class="btn-reset" data-reset="' + esc(b.actor_id) + '">Reset</button> '
+                    + '<button class="btn-danger" data-delete="' + esc(b.actor_id) + '">Delete</button>'
+                    + '</td></tr>';
+            });
+            html += '</tbody></table>';
+            el.innerHTML = html;
+
+            el.querySelectorAll('[data-reset]').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    post('/budgets/reset', {actor_id: btn.dataset.reset}).then(loadBudgets);
+                });
+            });
+            el.querySelectorAll('[data-delete]').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    if (confirm('Delete budget for ' + btn.dataset.delete + '?')) {
+                        post('/budgets/delete', {actor_id: btn.dataset.delete}).then(loadBudgets);
+                    }
+                });
+            });
+        });
+    }
+
+    document.getElementById('btn-set-budget').addEventListener('click', function() {
+        var actor = document.getElementById('budget_actor_id').value.trim();
+        var budget = document.getElementById('budget_usd').value.trim();
+        if (!actor || !budget) return;
+        post('/budgets/set', {actor_id: actor, budget_usd: parseFloat(budget)}).then(function() {
+            document.getElementById('budget_actor_id').value = '';
+            document.getElementById('budget_usd').value = '';
+            loadBudgets();
+        });
+    });
+
+    loadBudgets();
+
+    // --- Models ---
+    fetch(API + '/models').then(function(r) { return r.json(); }).then(function(data) {
+        var sel = document.getElementById('model');
+        sel.innerHTML = '';
+        (data.models || []).forEach(function(m) {
+            var opt = document.createElement('option');
+            opt.value = m;
+            opt.textContent = m;
+            sel.appendChild(opt);
+        });
+        if (!data.models || !data.models.length) {
+            sel.innerHTML = '<option value="" disabled>No models with pricing available</option>';
+        }
+    });
+
+    // --- Prompt ---
+    document.getElementById('btn-send').addEventListener('click', function() {
+        var btn = this;
+        var model = document.getElementById('model').value;
+        var prompt = document.getElementById('prompt').value.trim();
+        var resultEl = document.getElementById('prompt-result');
+
+        if (!prompt) { resultEl.innerHTML = '<div class="response-box error">Please enter a prompt.</div>'; return; }
+        if (!model) { resultEl.innerHTML = '<div class="response-box error">Please select a model.</div>'; return; }
+
+        btn.disabled = true;
+        btn.textContent = 'Sending...';
+        resultEl.innerHTML = '<div class="response-box">Waiting for response...</div>';
+
+        post('/prompt', {model: model, prompt: prompt}).then(function(data) {
+            btn.disabled = false;
+            btn.textContent = 'Send';
+            if (data.error) {
+                resultEl.innerHTML = '<div class="response-box error">' + esc(data.error) + '</div>';
+            } else {
+                resultEl.innerHTML = '<div class="response-box">' + esc(data.response) + '</div>'
+                    + '<div class="meta">Model: ' + esc(data.model)
+                    + ' | Tokens: ' + data.input_tokens + ' in / ' + data.output_tokens + ' out'
+                    + ' | Cost: $' + data.cost_usd.toFixed(6) + '</div>';
+            }
+            loadBudgets();
+        }).catch(function(err) {
+            btn.disabled = false;
+            btn.textContent = 'Send';
+            resultEl.innerHTML = '<div class="response-box error">Request failed: ' + esc(err.message) + '</div>';
+        });
+    });
+})();
+</script>
+{% endblock %}

@@ -1,8 +1,11 @@
 """
 Tests for pricing lookup and cost calculation.
 """
+
 import pytest
 from datasette_llm_accountant import (
+    PricingProvider,
+    DefaultPricingProvider,
     get_model_pricing,
     calculate_cost_nanocents,
     usd_to_nanocents,
@@ -85,7 +88,10 @@ def test_calculate_cost_with_model_without_cached_pricing():
     )
 
     cost_with_cached = calculate_cost_nanocents(
-        "claude-3.5-sonnet", input_tokens=1000, output_tokens=500, cached_input_tokens=500
+        "claude-3.5-sonnet",
+        input_tokens=1000,
+        output_tokens=500,
+        cached_input_tokens=500,
     )
 
     # Should be different because cached tokens are treated as uncached
@@ -94,3 +100,57 @@ def test_calculate_cost_with_model_without_cached_pricing():
     # vs
     # Input: 500 tokens * 3 USD/million = 150,000,000
     assert cost_with_cached < cost_no_cached
+
+
+def test_pricing_provider_abc_contract():
+    """Test that PricingProvider enforces the abstract contract."""
+    # Can't instantiate without implementing get_model_pricing
+    with pytest.raises(TypeError):
+        PricingProvider()
+
+    # A proper implementation works
+    class MyProvider(PricingProvider):
+        def get_model_pricing(self, model_id: str) -> dict:
+            return {"input": 1.0, "output": 2.0, "input_cached": None}
+
+    provider = MyProvider()
+    assert provider.get_model_pricing("x")["input"] == 1.0
+
+
+def test_custom_provider_calculate_cost():
+    """Test that a custom provider's calculate_cost_nanocents works."""
+
+    class FixedProvider(PricingProvider):
+        def get_model_pricing(self, model_id: str) -> dict:
+            return {
+                "id": model_id,
+                "input": 10.0,   # $10 per million input tokens
+                "output": 20.0,  # $20 per million output tokens
+                "input_cached": 5.0,
+            }
+
+    provider = FixedProvider()
+
+    # 1000 input, 500 output, no cached
+    cost = provider.calculate_cost_nanocents("any-model", input_tokens=1000, output_tokens=500)
+    # Input: 1000 * 10.0 * 100_000 = 1,000,000,000
+    # Output: 500 * 20.0 * 100_000 = 1,000,000,000
+    assert cost == 2_000_000_000
+
+    # With cached tokens
+    cost_cached = provider.calculate_cost_nanocents(
+        "any-model", input_tokens=1000, output_tokens=500, cached_input_tokens=400
+    )
+    # Uncached input: 600 * 10.0 * 100_000 = 600,000,000
+    # Cached input: 400 * 5.0 * 100_000 = 200,000,000
+    # Output: 500 * 20.0 * 100_000 = 1,000,000,000
+    assert cost_cached == 1_800_000_000
+
+
+def test_default_pricing_provider_is_pricing_provider():
+    """Test that DefaultPricingProvider is a proper PricingProvider subclass."""
+    provider = DefaultPricingProvider()
+    assert isinstance(provider, PricingProvider)
+    # Should be able to look up a known model
+    pricing = provider.get_model_pricing("gpt-4o-mini")
+    assert pricing["id"] == "gpt-4o-mini"

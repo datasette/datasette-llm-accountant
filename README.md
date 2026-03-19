@@ -5,168 +5,225 @@
 [![Tests](https://github.com/datasette/datasette-llm-accountant/actions/workflows/test.yml/badge.svg)](https://github.com/datasette/datasette-llm-accountant/actions/workflows/test.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/datasette/datasette-llm-accountant/blob/main/LICENSE)
 
-Accounting for LLM token usage
+Budget management and cost tracking for LLM usage in Datasette.
 
 ## Installation
 
-Install this plugin in the same environment as Datasette.
+Install this plugin in the same environment as Datasette:
+
 ```bash
 datasette install datasette-llm-accountant
 ```
+
+This plugin works alongside [datasette-llm](https://github.com/datasette/datasette-llm) to provide automatic cost tracking and budget enforcement for LLM prompts.
+
 ## Overview
 
-This plugin provides a library for other Datasette plugins to interact with LLMs via a layer that does accounting and cost tracking. It wraps the [llm](https://llm.datasette.io/) library with automatic cost calculation and spending limits.
+This plugin provides:
 
-## Usage
+- **Automatic cost calculation** based on token usage and model pricing
+- **Reserve/settle pattern** for budget enforcement
+- **Accountant plugin system** for custom spending trackers
+- **Hook integration** with datasette-llm for transparent accounting
 
-### Basic Usage
+When installed, all prompts made through `datasette-llm` are automatically wrapped with accounting logic. Accountants can enforce spending limits, log usage, and track costs.
 
-```python
-from datasette_llm_accountant import LlmWrapper
+## How It Works
 
-# In your Datasette plugin
-llm = LlmWrapper(datasette)
+1. When a prompt is made via `datasette-llm`, this plugin's hooks intercept the call
+2. A reservation is made with all registered accountants for the estimated cost
+3. The prompt executes
+4. The actual cost is calculated from token usage
+5. Accountants are settled with the real cost (refunding any unused reservation)
 
-# Get an async model wrapped with accounting
-model = llm.get_async_model("gpt-4o-mini")
+## Configuration
 
-# Use with automatic reservation (defaults to 50 cents)
-response = await model.prompt("Write a poem about a pirate")
+Configure reservation amounts in `datasette.yaml`:
+
+```yaml
+plugins:
+  datasette-llm-accountant:
+    # Default reservation for single prompts
+    auto_reservation_usd: 0.10
+
+    # Default reservation for grouped prompts
+    default_reservation_usd: 0.50
+
+    # Purpose-specific reservations
+    purposes:
+      enrichments:
+        reservation_usd: 5.00
+      query-assistant:
+        reservation_usd: 0.25
 ```
 
-### Manual Reservations
+## Creating an Accountant Plugin
 
-You can manually reserve an amount and track spending across multiple prompts:
-
-```python
-# Reserve $4.50 for multiple prompts
-async with model.reserve(usd=4.50) as tx:
-    response1 = await tx.prompt("First question")
-    response2 = await tx.prompt("Follow-up question")
-    # Total spending is tracked cumulatively
-```
-
-You can also specify reservations in nanocents (1/1,000,000,000 of a cent):
-
-```python
-async with model.reserve(nanocents=50_000_000_000) as tx:  # 50 cents
-    response = await tx.prompt("a poem about a pirate")
-```
-
-### Cost Protection
-
-If a prompt exceeds your reservation, a `ReservationExceededError` is raised:
-
-```python
-from datasette_llm_accountant import ReservationExceededError
-
-try:
-    async with model.reserve(usd=0.01) as tx:  # Very small reservation
-        # This might exceed the reservation
-        response = await tx.prompt("Write a very long story...")
-except ReservationExceededError as e:
-    print(f"Exceeded budget: {e}")
-```
-
-## Creating Accountant Plugins
-
-Other plugins can implement accountants to track and limit LLM spending. Create a plugin that implements the `register_llm_accountants` hook:
+Accountants track and enforce LLM spending. Create a plugin that implements the `register_llm_accountants` hook:
 
 ```python
 from datasette import hookimpl
 from datasette_llm_accountant import Accountant, Tx, InsufficientBalanceError
 
-class DatabaseAccountant(Accountant):
-    """Tracks spending in a database."""
+class MyAccountant(Accountant):
+    """Custom accountant that tracks spending."""
 
-    async def reserve(self, nanocents: int) -> Tx:
-        # Check if user has sufficient balance
-        # If not, raise InsufficientBalanceError
-        # Otherwise, create and return a transaction ID
-        tx_id = await self.create_reservation(nanocents)
+    def __init__(self, datasette):
+        self.datasette = datasette
+
+    async def reserve(
+        self,
+        nanocents: int,
+        model_id: str = None,
+        purpose: str = None,
+    ) -> Tx:
+        """
+        Reserve the specified amount.
+
+        Args:
+            nanocents: Amount to reserve (1 USD = 100,000,000,000 nanocents)
+            model_id: The model being used (e.g., "gpt-4o-mini")
+            purpose: The purpose of the request (e.g., "enrichments")
+
+        Returns:
+            A transaction ID for settlement
+
+        Raises:
+            InsufficientBalanceError: If reservation cannot be made
+        """
+        # Check balance, create reservation, return transaction ID
+        if not await self.has_sufficient_balance(nanocents):
+            raise InsufficientBalanceError("Insufficient balance")
+
+        tx_id = await self.create_reservation(nanocents, model_id, purpose)
         return Tx(tx_id)
 
-    async def settle(self, tx: Tx, nanocents: int):
-        # Record the actual amount spent for this transaction
-        await self.record_settlement(tx, nanocents)
+    async def settle(
+        self,
+        tx: Tx,
+        nanocents: int,
+        model_id: str = None,
+        purpose: str = None,
+    ):
+        """
+        Settle a transaction for the actual amount spent.
+
+        Args:
+            tx: Transaction ID from reserve()
+            nanocents: Actual amount spent
+            model_id: The model that was used
+            purpose: The purpose of the request
+        """
+        await self.record_settlement(tx, nanocents, model_id, purpose)
 
     async def rollback(self, tx: Tx):
-        # Optional: Release/cancel the reservation
-        # Default implementation settles for 0
-        await self.cancel_reservation(tx)
+        """Optional: Release a reservation without charging."""
+        await self.settle(tx, 0)
 
 @hookimpl
 def register_llm_accountants(datasette):
-    return [DatabaseAccountant(datasette)]
+    return [MyAccountant(datasette)]
 ```
 
-### Multiple Accountants
+See [datasette-llm-allowance](https://github.com/datasette/datasette-llm-allowance) for a complete implementation that uses Datasette's internal database to track a spending allowance.
 
-The system supports multiple accountants. When a reservation is made:
+## Multiple Accountants
+
+Multiple accountants can be registered. When a reservation is made:
 
 1. All accountants are called in sequence to reserve the amount
-2. If any accountant fails, all previous reservations are rolled back
-3. When the transaction completes, all accountants are settled with the actual cost
+2. If any accountant fails (e.g., `InsufficientBalanceError`), previous reservations are rolled back
+3. When the prompt completes, all accountants are settled with the actual cost
 
-This allows for multiple layers of accounting (e.g., per-user limits, per-project limits, global limits).
+This enables layered accounting (per-user limits, per-project budgets, global caps, etc.).
 
 ## Cost Calculation
 
-Costs are automatically calculated based on token usage and current pricing data from [llm-prices.com](https://www.llm-prices.com/). The library:
+Costs are calculated using pricing data from [llm-prices.com](https://www.llm-prices.com/):
 
-- Tracks input and output tokens separately
-- Handles cached input tokens when available
-- Converts costs to nanocents for precise accounting
-- Works with 80+ models across multiple providers
+```python
+from datasette_llm_accountant import calculate_cost_nanocents
+
+cost = calculate_cost_nanocents(
+    model_id="gpt-4o-mini",
+    input_tokens=1000,
+    output_tokens=500,
+    cached_input_tokens=200,  # Optional
+)
+# Returns cost in nanocents
+```
+
+### Pricing Utilities
+
+```python
+from datasette_llm_accountant import (
+    usd_to_nanocents,
+    nanocents_to_usd,
+    get_model_pricing,
+)
+
+# Convert between USD and nanocents
+nanocents = usd_to_nanocents(1.50)  # 150,000,000,000
+usd = nanocents_to_usd(150_000_000_000)  # 1.5
+
+# Get pricing for a model
+pricing = get_model_pricing("gpt-4o-mini")
+# Returns: {"input": 0.15, "output": 0.6, "cached_input": 0.075}
+# Prices are per million tokens
+```
 
 ## API Reference
-
-### LlmWrapper
-
-```python
-wrapper = LlmWrapper(datasette)
-model = wrapper.get_async_model("model-id")
-```
-
-### AccountedModel
-
-```python
-# Direct prompt with auto-reservation
-response = await model.prompt("text", usd=0.5)
-
-# Manual reservation
-async with model.reserve(usd=1.0) as tx:
-    response = await tx.prompt("text")
-```
 
 ### Accountant Base Class
 
 ```python
 class Accountant(ABC):
-    async def reserve(self, nanocents: int) -> Tx: ...
-    async def settle(self, tx: Tx, nanocents: int): ...
-    async def rollback(self, tx: Tx): ...  # Optional override
+    @abstractmethod
+    async def reserve(
+        self,
+        nanocents: int,
+        model_id: str = None,
+        purpose: str = None,
+    ) -> Tx:
+        """Reserve an amount, return transaction ID."""
+        pass
+
+    @abstractmethod
+    async def settle(
+        self,
+        tx: Tx,
+        nanocents: int,
+        model_id: str = None,
+        purpose: str = None,
+    ):
+        """Settle a transaction for the actual amount."""
+        pass
+
+    async def rollback(self, tx: Tx):
+        """Release a reservation (default: settle for 0)."""
+        await self.settle(tx, 0)
 ```
 
 ### Exceptions
 
-- `InsufficientBalanceError` - Accountant cannot reserve the requested amount
-- `ReservationExceededError` - Actual cost exceeds reserved amount
-- `ModelPricingNotFoundError` - Pricing data not available for model
+- `InsufficientBalanceError` - Raised when an accountant cannot reserve the requested amount
+- `ReservationExceededError` - Raised when actual cost exceeds the reserved amount
+- `ModelPricingNotFoundError` - Raised when pricing data is not available for a model
+
+### Nanocents
+
+All amounts use nanocents for precision:
+
+- 1 nanocent = 1/1,000,000,000 of a cent
+- 1 USD = 100 cents = 100,000,000,000 nanocents
+- This allows tracking costs down to fractions of a cent without floating-point errors
 
 ## Development
 
-To set up this plugin locally, first checkout the code. Then create a new virtual environment:
 ```bash
 cd datasette-llm-accountant
 python -m venv venv
 source venv/bin/activate
-```
-Now install the dependencies and test dependencies:
-```bash
 pip install -e '.[test]'
-```
-To run the tests:
-```bash
 python -m pytest
 ```

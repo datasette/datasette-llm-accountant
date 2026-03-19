@@ -1,15 +1,17 @@
 from datasette import hookimpl
 from datasette.plugins import pm
 
-# Register our plugin hooks
 from . import hookspecs
 
 pm.add_hookspecs(hookspecs)
 
-# Export main classes for use by other plugins and applications
-from .wrapper import LlmWrapper, AccountedModel, AccountedTransaction
+from . import hooks
+
 from .accountant import Accountant, Tx, InsufficientBalanceError
+from .hooks import ReservationExceededError, GroupReservation
 from .pricing import (
+    PricingProvider,
+    DefaultPricingProvider,
     calculate_cost_nanocents,
     get_model_pricing,
     usd_to_nanocents,
@@ -18,15 +20,29 @@ from .pricing import (
 )
 
 __all__ = [
-    "LlmWrapper",
-    "AccountedModel",
-    "AccountedTransaction",
+    # Accountant base class (for implementing custom accountants)
     "Accountant",
     "Tx",
     "InsufficientBalanceError",
+    # Errors
+    "ReservationExceededError",
+    # Pricing providers
+    "PricingProvider",
+    "DefaultPricingProvider",
+    # Pricing utilities
     "calculate_cost_nanocents",
     "get_model_pricing",
     "usd_to_nanocents",
     "nanocents_to_usd",
     "ModelPricingNotFoundError",
 ]
+
+
+@hookimpl
+def llm_prompt_context(datasette, model_id, prompt, purpose):
+    return hooks.llm_prompt_context(datasette, model_id, prompt, purpose)
+
+
+@hookimpl
+def llm_group_exit(datasette, group):
+    return hooks.llm_group_exit(datasette, group)
