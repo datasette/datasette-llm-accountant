@@ -15,6 +15,9 @@ dependencies = [
     "httpx"
 ]
 
+[tool.setuptools]
+packages = ["datasette_llm_accountant"]
+
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
