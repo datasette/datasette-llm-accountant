@@ -11,7 +11,7 @@ classifiers=[
 requires-python = ">=3.10"
 dependencies = [
     "datasette>=1.0a21",
-    "datasette-llm>=0.1a0",
+    "datasette-llm>=0.1a5",
     "llm",
     "httpx"
 ]
@@ -24,9 +24,6 @@ dev = [
     "llm-echo",
     "datasette-debug-gotham"
 ]
-
-[tool.uv.sources]
-datasette-llm = { path = "../datasette-llm" }
 
 [build-system]
 requires = ["setuptools"]
