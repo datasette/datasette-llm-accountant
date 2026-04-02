@@ -24,6 +24,7 @@ This plugin provides:
 - **Automatic cost calculation** based on token usage and model pricing
 - **Reserve/settle pattern** for budget enforcement
 - **Accountant plugin system** for custom spending trackers
+- **Custom pricing providers** with access to the full response object
 - **Hook integration** with datasette-llm for transparent accounting
 
 When installed, all prompts made through `datasette-llm` are automatically wrapped with accounting logic. Accountants can enforce spending limits, log usage, and track costs.
@@ -33,7 +34,7 @@ When installed, all prompts made through `datasette-llm` are automatically wrapp
 1. When a prompt is made via `datasette-llm`, this plugin's hooks intercept the call
 2. A reservation is made with all registered accountants for the estimated cost
 3. The prompt executes
-4. The actual cost is calculated from token usage
+4. The actual cost is calculated via `PricingProvider.calculate_cost_from_response()`
 5. Accountants are settled with the real cost (refunding any unused reservation)
 
 ## Configuration
@@ -57,13 +58,36 @@ plugins:
         reservation_usd: 0.25
 ```
 
+## Nanocents
+
+All monetary amounts use the `Nanocents` type — an `int` subclass that makes units explicit and prevents accidentally passing raw dollar amounts where nanocents are expected.
+
+- 1 nanocent = 1/1,000,000,000 of a cent
+- 1 USD = 100 cents = 100,000,000,000 nanocents
+- This allows tracking costs down to fractions of a cent without floating-point errors
+
+```python
+from datasette_llm_accountant import Nanocents
+
+# Create from USD or cents
+cost = Nanocents.from_usd(1.50)   # 150,000,000,000
+cost = Nanocents.from_cents(50)   # 50,000,000,000
+
+# Convert back
+cost.to_usd()    # 1.5
+cost.to_cents()  # 150.0
+
+# Works like a regular int for arithmetic
+total = cost + Nanocents.from_usd(0.50)
+```
+
 ## Creating an Accountant Plugin
 
 Accountants track and enforce LLM spending. Create a plugin that implements the `register_llm_accountants` hook:
 
 ```python
 from datasette import hookimpl
-from datasette_llm_accountant import Accountant, Tx, InsufficientBalanceError
+from datasette_llm_accountant import Accountant, Tx, Nanocents, InsufficientBalanceError
 
 class MyAccountant(Accountant):
     """Custom accountant that tracks spending."""
@@ -73,52 +97,31 @@ class MyAccountant(Accountant):
 
     async def reserve(
         self,
-        nanocents: int,
+        nanocents: Nanocents,
         model_id: str = None,
         purpose: str = None,
+        actor_id: str = None,
     ) -> Tx:
-        """
-        Reserve the specified amount.
-
-        Args:
-            nanocents: Amount to reserve (1 USD = 100,000,000,000 nanocents)
-            model_id: The model being used (e.g., "gpt-4o-mini")
-            purpose: The purpose of the request (e.g., "enrichments")
-
-        Returns:
-            A transaction ID for settlement
-
-        Raises:
-            InsufficientBalanceError: If reservation cannot be made
-        """
-        # Check balance, create reservation, return transaction ID
+        """Reserve the specified amount. Raise InsufficientBalanceError to block."""
         if not await self.has_sufficient_balance(nanocents):
             raise InsufficientBalanceError("Insufficient balance")
-
         tx_id = await self.create_reservation(nanocents, model_id, purpose)
         return Tx(tx_id)
 
     async def settle(
         self,
         tx: Tx,
-        nanocents: int,
+        nanocents: Nanocents,
         model_id: str = None,
         purpose: str = None,
+        actor_id: str = None,
     ):
-        """
-        Settle a transaction for the actual amount spent.
-
-        Args:
-            tx: Transaction ID from reserve()
-            nanocents: Actual amount spent
-            model_id: The model that was used
-            purpose: The purpose of the request
-        """
+        """Settle a transaction for the actual amount spent."""
         await self.record_settlement(tx, nanocents, model_id, purpose)
 
     async def rollback(self, tx: Tx):
         """Optional: Release a reservation without charging."""
-        await self.settle(tx, 0)
+        await self.settle(tx, Nanocents(0))
 
 @hookimpl
 def register_llm_accountants(datasette):
@@ -137,39 +140,45 @@ Multiple accountants can be registered. When a reservation is made:
 
 This enables layered accounting (per-user limits, per-project budgets, global caps, etc.).
 
-## Cost Calculation
+## Custom Pricing Providers
 
-Costs are calculated using pricing data from [llm-prices.com](https://www.llm-prices.com/):
-
-```python
-from datasette_llm_accountant import calculate_cost_nanocents
-
-cost = calculate_cost_nanocents(
-    model_id="gpt-4o-mini",
-    input_tokens=1000,
-    output_tokens=500,
-    cached_input_tokens=200,  # Optional
-)
-# Returns cost in nanocents
-```
-
-### Pricing Utilities
+The default pricing provider fetches model prices from [llm-prices.com](https://www.llm-prices.com/). You can register a custom provider to control how costs are calculated:
 
 ```python
-from datasette_llm_accountant import (
-    usd_to_nanocents,
-    nanocents_to_usd,
-    get_model_pricing,
-)
+from datasette import hookimpl
+from datasette_llm_accountant import PricingProvider, Nanocents
 
-# Convert between USD and nanocents
-nanocents = usd_to_nanocents(1.50)  # 150,000,000,000
-usd = nanocents_to_usd(150_000_000_000)  # 1.5
+class MyPricingProvider(PricingProvider):
+    async def calculate_cost_from_response(self, model_id, usage, response):
+        """
+        Calculate cost from a completed response.
 
-# Get pricing for a model
-pricing = get_model_pricing("gpt-4o-mini")
-# Returns: {"input": 0.15, "output": 0.6, "cached_input": 0.075}
-# Prices are per million tokens
+        Args:
+            model_id: The model identifier
+            usage: An llm.Usage object with input/output token counts
+            response: The llm.AsyncResponse object — use this to access
+                      provider-specific metadata (e.g., generation IDs
+                      for exact cost lookups from the provider's API)
+        Returns:
+            Cost as a Nanocents value
+        """
+        input_tokens = usage.input or 0
+        output_tokens = usage.output or 0
+        cost_usd = input_tokens * 0.01 / 1_000_000 + output_tokens * 0.03 / 1_000_000
+        return Nanocents.from_usd(cost_usd)
+
+    async def supported_models(self):
+        """Return the set of model IDs this provider can price,
+        or None to indicate all models are supported.
+
+        Used to filter the model list — models not in this set
+        won't be available when accountants are registered.
+        """
+        return self.known_models
+
+@hookimpl
+def register_llm_accountant_pricing(datasette):
+    return MyPricingProvider()
 ```
 
 ## API Reference
@@ -181,27 +190,42 @@ class Accountant(ABC):
     @abstractmethod
     async def reserve(
         self,
-        nanocents: int,
+        nanocents: Nanocents,
         model_id: str = None,
         purpose: str = None,
+        actor_id: str = None,
     ) -> Tx:
         """Reserve an amount, return transaction ID."""
-        pass
 
     @abstractmethod
     async def settle(
         self,
         tx: Tx,
-        nanocents: int,
+        nanocents: Nanocents,
         model_id: str = None,
         purpose: str = None,
+        actor_id: str = None,
     ):
         """Settle a transaction for the actual amount."""
-        pass
 
     async def rollback(self, tx: Tx):
         """Release a reservation (default: settle for 0)."""
-        await self.settle(tx, 0)
+        await self.settle(tx, Nanocents(0))
+```
+
+### PricingProvider Base Class
+
+```python
+class PricingProvider(ABC):
+    @abstractmethod
+    async def calculate_cost_from_response(
+        self, model_id: str, usage: Usage, response: AsyncResponse
+    ) -> Nanocents:
+        """Calculate cost from a completed response."""
+
+    async def supported_models(self) -> Optional[set[str]]:
+        """Return set of supported model IDs, or None for all. Default: None."""
+        return None
 ```
 
 ### Exceptions
@@ -210,20 +234,10 @@ class Accountant(ABC):
 - `ReservationExceededError` - Raised when actual cost exceeds the reserved amount
 - `ModelPricingNotFoundError` - Raised when pricing data is not available for a model
 
-### Nanocents
-
-All amounts use nanocents for precision:
-
-- 1 nanocent = 1/1,000,000,000 of a cent
-- 1 USD = 100 cents = 100,000,000,000 nanocents
-- This allows tracking costs down to fractions of a cent without floating-point errors
-
 ## Development
 
 ```bash
 cd datasette-llm-accountant
-python -m venv venv
-source venv/bin/activate
-pip install -e '.[test]'
-python -m pytest
+pip install -e '.[dev]'
+pytest
 ```

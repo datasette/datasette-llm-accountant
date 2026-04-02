@@ -3,16 +3,14 @@ Tests for the datasette-llm hook integration.
 """
 
 import pytest
-from unittest.mock import Mock, AsyncMock
+from typing import Optional
 from datasette.app import Datasette
 from datasette import hookimpl
-from contextlib import asynccontextmanager
 
 from datasette_llm_accountant import (
     Accountant,
     Tx,
     InsufficientBalanceError,
-    ReservationExceededError,
     PricingProvider,
     DefaultPricingProvider,
     ModelPricingNotFoundError,
@@ -31,23 +29,25 @@ class AccountantTest(Accountant):
     async def reserve(
         self,
         nanocents: int,
-        model_id: str = None,
-        purpose: str = None,
+        model_id: Optional[str] = None,
+        purpose: Optional[str] = None,
+        actor_id: Optional[str] = None,
     ) -> Tx:
         if self.should_fail:
             raise InsufficientBalanceError("Insufficient balance")
         tx = Tx(f"tx-{len(self.reservations)}")
-        self.reservations.append((tx, nanocents, model_id, purpose))
+        self.reservations.append((tx, nanocents, model_id, purpose, actor_id))
         return tx
 
     async def settle(
         self,
         tx: Tx,
         nanocents: int,
-        model_id: str = None,
-        purpose: str = None,
+        model_id: Optional[str] = None,
+        purpose: Optional[str] = None,
+        actor_id: Optional[str] = None,
     ):
-        self.settlements.append((tx, nanocents, model_id, purpose))
+        self.settlements.append((tx, nanocents, model_id, purpose, actor_id))
 
     async def rollback(self, tx: Tx):
         self.rollbacks.append(tx)
@@ -61,7 +61,9 @@ def test_accountant():
 
 @pytest.fixture
 def datasette_with_accountant(test_accountant):
-    """Create a Datasette instance with a test accountant registered."""
+    """Create a Datasette instance with a test accountant and pricing provider."""
+
+    pricing_provider = HardcodedPricingProvider()
 
     class TestAccountantPlugin:
         __name__ = "test_accountant_plugin"
@@ -69,6 +71,10 @@ def datasette_with_accountant(test_accountant):
         @hookimpl
         def register_llm_accountants(self, datasette):
             return [test_accountant]
+
+        @hookimpl
+        def register_llm_accountant_pricing(self, datasette):
+            return pricing_provider
 
     datasette = Datasette(memory=True)
     plugin = TestAccountantPlugin()
@@ -100,7 +106,7 @@ async def test_single_prompt_auto_reservation(datasette_with_accountant):
     model = await llm.model("echo", purpose="test")
 
     response = await model.prompt("Hello")
-    text = await response.text()
+    await response.text()
 
     # Accountant should have reserved (default 0.10 USD for single prompts)
     assert len(accountant.reservations) == 1
@@ -176,12 +182,18 @@ async def test_config_purpose_reservation():
 
     test_accountant = AccountantTest()
 
+    pricing_provider = HardcodedPricingProvider()
+
     class TestPlugin:
         __name__ = "test_plugin"
 
         @hookimpl
         def register_llm_accountants(self, datasette):
             return [test_accountant]
+
+        @hookimpl
+        def register_llm_accountant_pricing(self, datasette):
+            return pricing_provider
 
     # Create datasette with config
     datasette = Datasette(
@@ -356,17 +368,15 @@ class HardcodedPricingProvider(PricingProvider):
     def __init__(self):
         self.calls = []
 
-    def get_model_pricing(self, model_id: str) -> dict:
+    async def supported_models(self):
+        return {"echo"}
+
+    async def calculate_cost_from_response(self, model_id, usage, response):
         self.calls.append(model_id)
         if model_id == "echo":
-            return {
-                "id": "echo",
-                "vendor": "test",
-                "name": "Echo",
-                "input": 50.0,   # $50 per million input tokens
-                "output": 100.0,  # $100 per million output tokens
-                "input_cached": None,
-            }
+            input_tokens = usage.input or 0
+            output_tokens = usage.output or 0
+            return int(input_tokens * 50.0 * 100_000 + output_tokens * 100.0 * 100_000)
         raise ModelPricingNotFoundError(f"No pricing for {model_id}")
 
 
@@ -424,3 +434,96 @@ async def test_default_pricing_provider_fallback():
     datasette = Datasette(memory=True)
     provider = _get_pricing_provider(datasette)
     assert isinstance(provider, DefaultPricingProvider)
+
+
+@pytest.mark.asyncio
+async def test_filter_models_removes_unpriceable():
+    """Test that models without pricing are filtered out when accountants are registered."""
+    from datasette_llm import LLM
+
+    test_accountant = AccountantTest()
+    pricing_provider = HardcodedPricingProvider()
+
+    class TestPlugin:
+        __name__ = "test_filter_plugin"
+
+        @hookimpl
+        def register_llm_accountants(self, datasette):
+            return [test_accountant]
+
+        @hookimpl
+        def register_llm_accountant_pricing(self, datasette):
+            return pricing_provider
+
+    datasette = Datasette(memory=True)
+    plugin = TestPlugin()
+    datasette.pm.register(plugin, name="test-filter")
+
+    try:
+        llm = LLM(datasette)
+        models = await llm.models()
+
+        # Only models with pricing in HardcodedPricingProvider should remain
+        # HardcodedPricingProvider only has pricing for "echo"
+        model_ids = [m.model_id for m in models]
+        assert "echo" in model_ids
+
+        # Any other models that happen to be installed should be filtered out
+        # (since they won't be in HardcodedPricingProvider)
+        for model_id in model_ids:
+            assert model_id == "echo"
+
+    finally:
+        datasette.pm.unregister(name="test-filter")
+
+
+@pytest.mark.asyncio
+async def test_filter_models_no_accountants_passes_through():
+    """Test that models are not filtered when no accountants are registered."""
+    from datasette_llm import LLM
+
+    datasette = Datasette(memory=True)
+    llm = LLM(datasette)
+    models = await llm.models()
+
+    # Without accountants, all models should be available
+    model_ids = [m.model_id for m in models]
+    assert "echo" in model_ids
+
+
+@pytest.mark.asyncio
+async def test_actor_id_passed_to_accountant():
+    """Test that actor_id is passed through to reserve and settle."""
+    from datasette_llm import LLM
+
+    test_accountant = AccountantTest()
+    pricing_provider = HardcodedPricingProvider()
+
+    class TestPlugin:
+        __name__ = "test_actor_plugin"
+
+        @hookimpl
+        def register_llm_accountants(self, datasette):
+            return [test_accountant]
+
+        @hookimpl
+        def register_llm_accountant_pricing(self, datasette):
+            return pricing_provider
+
+    datasette = Datasette(memory=True)
+    plugin = TestPlugin()
+    datasette.pm.register(plugin, name="test-actor")
+
+    try:
+        llm = LLM(datasette)
+        model = await llm.model("echo", purpose="test", actor={"id": "user-123"})
+
+        response = await model.prompt("Hello")
+        await response.text()
+
+        # actor_id should be passed through
+        assert test_accountant.reservations[0][4] == "user-123"
+        assert test_accountant.settlements[0][4] == "user-123"
+
+    finally:
+        datasette.pm.unregister(name="test-actor")

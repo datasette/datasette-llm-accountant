@@ -13,11 +13,9 @@ from datasette.plugins import pm
 
 from .accountant import Accountant, Tx, InsufficientBalanceError
 from .pricing import (
+    Nanocents,
     DefaultPricingProvider,
     PricingProvider,
-    calculate_cost_nanocents,
-    usd_to_nanocents,
-    ModelPricingNotFoundError,
 )
 
 
@@ -36,17 +34,19 @@ class GroupReservation:
 
     def __init__(
         self,
-        nanocents: int,
+        nanocents: Nanocents,
         accountants: List[Accountant],
-        model_id: str = None,
-        purpose: str = None,
+        model_id: Optional[str] = None,
+        purpose: Optional[str] = None,
+        actor_id: Optional[str] = None,
     ):
         self.nanocents = nanocents
         self.accountants = accountants
         self.model_id = model_id
         self.purpose = purpose
+        self.actor_id = actor_id
         self.transactions: List[tuple[Accountant, Tx]] = []
-        self.spent_nanocents = 0
+        self.spent_nanocents = Nanocents(0)
         self._settled = False
 
     async def reserve_all(self):
@@ -57,6 +57,7 @@ class GroupReservation:
                     self.nanocents,
                     model_id=self.model_id,
                     purpose=self.purpose,
+                    actor_id=self.actor_id,
                 )
                 self.transactions.append((accountant, tx))
             except InsufficientBalanceError:
@@ -78,6 +79,7 @@ class GroupReservation:
                 self.spent_nanocents,
                 model_id=self.model_id,
                 purpose=self.purpose,
+                actor_id=self.actor_id,
             )
 
     async def _rollback(self):
@@ -88,7 +90,7 @@ class GroupReservation:
             except Exception:
                 pass  # Log but continue rolling back others
 
-    def add_usage(self, nanocents: int):
+    def add_usage(self, nanocents: Nanocents):
         """Add usage to this reservation."""
         self.spent_nanocents += nanocents
 
@@ -126,7 +128,7 @@ def _get_config(datasette) -> dict:
     return datasette.plugin_config("datasette-llm-accountant") or {}
 
 
-def _calculate_reservation_nanocents(datasette, model_id, purpose) -> int:
+def _calculate_reservation_nanocents(datasette, model_id, purpose) -> Nanocents:
     """Calculate reservation amount from configuration."""
     config = _get_config(datasette)
 
@@ -135,30 +137,30 @@ def _calculate_reservation_nanocents(datasette, model_id, purpose) -> int:
     if purpose and purpose in purposes:
         purpose_config = purposes[purpose]
         if "reservation_nanocents" in purpose_config:
-            return purpose_config["reservation_nanocents"]
+            return Nanocents(purpose_config["reservation_nanocents"])
         elif "reservation_usd" in purpose_config:
-            return usd_to_nanocents(purpose_config["reservation_usd"])
+            return Nanocents.from_usd(purpose_config["reservation_usd"])
 
     # Fall back to model-specific config
     models = config.get("models", {})
     if model_id in models:
         model_config = models[model_id]
         if "reservation_nanocents" in model_config:
-            return model_config["reservation_nanocents"]
+            return Nanocents(model_config["reservation_nanocents"])
         elif "reservation_usd" in model_config:
-            return usd_to_nanocents(model_config["reservation_usd"])
+            return Nanocents.from_usd(model_config["reservation_usd"])
 
     # Fall back to global default
     if "default_reservation_nanocents" in config:
-        return config["default_reservation_nanocents"]
+        return Nanocents(config["default_reservation_nanocents"])
     elif "default_reservation_usd" in config:
-        return usd_to_nanocents(config["default_reservation_usd"])
+        return Nanocents.from_usd(config["default_reservation_usd"])
 
     # Default: $0.50
-    return usd_to_nanocents(0.50)
+    return Nanocents.from_usd(0.50)
 
 
-def llm_prompt_context(datasette, model_id, prompt, purpose):
+def llm_prompt_context(datasette, model_id, prompt, purpose, actor):
     """
     Wrap prompt execution with accounting.
 
@@ -176,6 +178,7 @@ def llm_prompt_context(datasette, model_id, prompt, purpose):
     @asynccontextmanager
     async def accounting_wrapper(result):
         group = result.group
+        actor_id = actor.get("id") if actor else None
 
         if group is not None:
             # Part of a group - use/create group's reservation
@@ -187,7 +190,11 @@ def llm_prompt_context(datasette, model_id, prompt, purpose):
                     datasette, model_id, purpose
                 )
                 reservation = GroupReservation(
-                    nanocents, accountants, model_id=model_id, purpose=purpose
+                    nanocents,
+                    accountants,
+                    model_id=model_id,
+                    purpose=purpose,
+                    actor_id=actor_id,
                 )
                 await reservation.reserve_all()
                 _active_reservations[group_id] = reservation
@@ -200,24 +207,17 @@ def llm_prompt_context(datasette, model_id, prompt, purpose):
             if reservation and result.response:
 
                 async def track_group_usage(response):
-                    try:
-                        usage = await response.usage()
-                        cost = provider.calculate_cost_nanocents(
-                            model_id,
-                            input_tokens=usage.input or 0,
-                            output_tokens=usage.output or 0,
-                        )
-                        reservation.add_usage(cost)
+                    usage = await response.usage()
+                    cost = await provider.calculate_cost_from_response(
+                        model_id, usage, response
+                    )
+                    reservation.add_usage(cost)
 
-                        if reservation.exceeded():
-                            raise ReservationExceededError(
-                                f"Cost {reservation.spent_nanocents} nanocents "
-                                f"exceeds reservation of {reservation.nanocents} nanocents"
-                            )
-                    except ModelPricingNotFoundError:
-                        pass  # Model doesn't have pricing data
-                    except Exception:
-                        pass  # Other errors (e.g., model doesn't support usage)
+                    if reservation.exceeded():
+                        raise ReservationExceededError(
+                            f"Cost {reservation.spent_nanocents} nanocents "
+                            f"exceeds reservation of {reservation.nanocents} nanocents"
+                        )
 
                 await result.response.on_done(track_group_usage)
 
@@ -226,14 +226,20 @@ def llm_prompt_context(datasette, model_id, prompt, purpose):
             config = _get_config(datasette)
 
             # Get auto-reservation amount (smaller default for single prompts)
-            auto_nanocents = config.get("auto_reservation_nanocents")
-            if auto_nanocents is None:
+            raw = config.get("auto_reservation_nanocents")
+            if raw is not None:
+                auto_nanocents = Nanocents(raw)
+            else:
                 auto_usd = config.get("auto_reservation_usd", 0.10)  # Default: $0.10
-                auto_nanocents = usd_to_nanocents(auto_usd)
+                auto_nanocents = Nanocents.from_usd(auto_usd)
 
             # Create a single-prompt reservation
             reservation = GroupReservation(
-                auto_nanocents, accountants, model_id=model_id, purpose=purpose
+                auto_nanocents,
+                accountants,
+                model_id=model_id,
+                purpose=purpose,
+                actor_id=actor_id,
             )
             await reservation.reserve_all()
 
@@ -246,14 +252,10 @@ def llm_prompt_context(datasette, model_id, prompt, purpose):
                     async def track_and_settle(response):
                         try:
                             usage = await response.usage()
-                            cost = provider.calculate_cost_nanocents(
-                                model_id,
-                                input_tokens=usage.input or 0,
-                                output_tokens=usage.output or 0,
+                            cost = await provider.calculate_cost_from_response(
+                                model_id, usage, response
                             )
                             reservation.add_usage(cost)
-                        except (ModelPricingNotFoundError, Exception):
-                            pass  # Settle with whatever we tracked
                         finally:
                             await reservation.settle_all()
 
@@ -281,3 +283,21 @@ def llm_group_exit(datasette, group):
         # Return coroutine for datasette-llm to await
         return reservation.settle_all()
     return None
+
+
+async def llm_filter_models(datasette, models, actor, purpose):
+    """
+    Filter out models that don't have pricing data.
+
+    When accountants are registered, models without pricing can't be
+    accounted for, so they shouldn't be available.
+    """
+    accountants = _get_accountants(datasette)
+    if not accountants:
+        return None
+
+    provider = _get_pricing_provider(datasette)
+    supported = await provider.supported_models()
+    if supported is None:
+        return models
+    return [model for model in models if model.model_id in supported]

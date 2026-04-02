@@ -15,3 +15,13 @@ dev *args:
             --plugins-dir sample \
             --template-dir sample/templates \
             {{args}}
+
+dev2 *args:
+    DATASETTE_SECRET=abc123 \
+    OPENROUTER_MODEL_FILTER=gemini \
+      uv run \
+        --with ../datasette-debug-gotham \
+          datasette \
+            --plugins-dir sample2 \
+            --template-dir sample2/templates \
+            {{args}}

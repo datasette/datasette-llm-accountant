@@ -2,7 +2,13 @@
 Base classes for LLM accounting.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from .pricing import Nanocents
 
 
 class Tx(str):
@@ -32,9 +38,10 @@ class Accountant(ABC):
     @abstractmethod
     async def reserve(
         self,
-        nanocents: int,
-        model_id: str = None,
-        purpose: str = None,
+        nanocents: Nanocents,
+        model_id: Optional[str] = None,
+        purpose: Optional[str] = None,
+        actor_id: Optional[str] = None,
     ) -> Tx:
         """
         Reserve the specified amount in nanocents.
@@ -43,6 +50,7 @@ class Accountant(ABC):
             nanocents: Amount to reserve in nanocents (1/1,000,000,000 of a cent)
             model_id: The model being used (e.g., "gpt-4o-mini")
             purpose: The purpose of the request (e.g., "query-assistant")
+            actor_id: The ID of the actor making the request
 
         Returns:
             A transaction ID that will be used for settlement
@@ -56,9 +64,10 @@ class Accountant(ABC):
     async def settle(
         self,
         tx: Tx,
-        nanocents: int,
-        model_id: str = None,
-        purpose: str = None,
+        nanocents: Nanocents,
+        model_id: Optional[str] = None,
+        purpose: Optional[str] = None,
+        actor_id: Optional[str] = None,
     ):
         """
         Settle a transaction for the actual amount spent.
@@ -68,6 +77,7 @@ class Accountant(ABC):
             nanocents: Actual amount spent in nanocents
             model_id: The model that was used
             purpose: The purpose of the request
+            actor_id: The ID of the actor making the request
         """
         pass
 
@@ -84,4 +94,6 @@ class Accountant(ABC):
         Args:
             tx: Transaction ID to rollback
         """
-        await self.settle(tx, 0)
+        from .pricing import Nanocents
+
+        await self.settle(tx, Nanocents(0))

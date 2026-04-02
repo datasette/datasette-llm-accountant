@@ -3,154 +3,118 @@ Tests for pricing lookup and cost calculation.
 """
 
 import pytest
+from llm.models import Usage
 from datasette_llm_accountant import (
+    Nanocents,
     PricingProvider,
     DefaultPricingProvider,
-    get_model_pricing,
-    calculate_cost_nanocents,
-    usd_to_nanocents,
-    nanocents_to_usd,
     ModelPricingNotFoundError,
 )
 
 
-def test_load_pricing_data():
-    """Test that pricing data loads successfully."""
-    pricing = get_model_pricing("gpt-4o-mini")
-    assert pricing["id"] == "gpt-4o-mini"
-    assert "input" in pricing
-    assert "output" in pricing
-    assert pricing["vendor"] == "openai"
-
-
-def test_get_model_pricing_not_found():
-    """Test that ModelPricingNotFoundError is raised for unknown models."""
-    with pytest.raises(ModelPricingNotFoundError) as exc_info:
-        get_model_pricing("nonexistent-model-xyz")
-    assert "nonexistent-model-xyz" in str(exc_info.value)
-
-
-def test_usd_to_nanocents():
-    """Test USD to nanocents conversion."""
-    assert usd_to_nanocents(1.0) == 100_000_000_000
-    assert usd_to_nanocents(0.5) == 50_000_000_000
-    assert usd_to_nanocents(0.01) == 1_000_000_000
-    assert usd_to_nanocents(10.0) == 1_000_000_000_000
-
-
-def test_nanocents_to_usd():
-    """Test nanocents to USD conversion."""
-    assert nanocents_to_usd(100_000_000_000) == 1.0
-    assert nanocents_to_usd(50_000_000_000) == 0.5
-    assert nanocents_to_usd(1_000_000_000) == 0.01
-
-
-def test_calculate_cost_nanocents():
-    """Test cost calculation from token usage."""
-    # For gpt-4o-mini (at time of test creation):
-    # input: 0.15 USD per million tokens
-    # output: 0.6 USD per million tokens
-
-    # Test with 1000 input tokens and 500 output tokens
-    cost = calculate_cost_nanocents("gpt-4o-mini", input_tokens=1000, output_tokens=500)
-
-    # Expected calculation:
-    # Input: 1000 tokens * 0.15 USD/million * 100,000 nanocents/token = 15,000,000 nanocents
-    # Output: 500 tokens * 0.6 USD/million * 100,000 nanocents/token = 30,000,000 nanocents
-    # Total: 45,000,000 nanocents
+@pytest.mark.asyncio
+async def test_calculate_cost_from_response():
+    """Test cost calculation via the default provider."""
+    provider = DefaultPricingProvider()
+    # gpt-4o-mini: input 0.15, output 0.6 USD per million tokens
+    usage = Usage(input=1000, output=500)
+    cost = await provider.calculate_cost_from_response("gpt-4o-mini", usage, None)
+    # Input: 1000 * 0.15 * 100_000 = 15,000,000
+    # Output: 500 * 0.6 * 100_000 = 30,000,000
     assert cost == 45_000_000
 
 
-def test_calculate_cost_nanocents_with_cached():
-    """Test cost calculation with cached input tokens."""
-    # For gpt-4o (has cached input pricing):
-    # input: 2.5 USD per million tokens
-    # output: 10 USD per million tokens
-    # input_cached: 1.25 USD per million tokens
-
-    cost = calculate_cost_nanocents(
-        "gpt-4o", input_tokens=1000, output_tokens=500, cached_input_tokens=500
-    )
-
-    # Expected calculation:
-    # Uncached input: 500 tokens * 2.5 USD/million * 100,000 = 125,000,000 nanocents
-    # Cached input: 500 tokens * 1.25 USD/million * 100,000 = 62,500,000 nanocents
-    # Output: 500 tokens * 10 USD/million * 100,000 = 500,000,000 nanocents
-    # Total: 687,500,000 nanocents
-    assert cost == 687_500_000
+@pytest.mark.asyncio
+async def test_calculate_cost_not_found():
+    """Test that ModelPricingNotFoundError is raised for unknown models."""
+    provider = DefaultPricingProvider()
+    usage = Usage(input=100, output=50)
+    with pytest.raises(ModelPricingNotFoundError) as exc_info:
+        await provider.calculate_cost_from_response("nonexistent-model-xyz", usage, None)
+    assert "nonexistent-model-xyz" in str(exc_info.value)
 
 
-def test_calculate_cost_with_model_without_cached_pricing():
-    """Test that cached tokens are charged at regular rate when no cached pricing."""
-    # claude-3.5-sonnet has no cached pricing (input_cached: null)
-    cost_no_cached = calculate_cost_nanocents(
-        "claude-3.5-sonnet", input_tokens=1000, output_tokens=500, cached_input_tokens=0
-    )
-
-    cost_with_cached = calculate_cost_nanocents(
-        "claude-3.5-sonnet",
-        input_tokens=1000,
-        output_tokens=500,
-        cached_input_tokens=500,
-    )
-
-    # Should be different because cached tokens are treated as uncached
-    # Actually, the uncached input is reduced, so cost should be lower
-    # Input: 1000 tokens * 3 USD/million = 300,000,000
-    # vs
-    # Input: 500 tokens * 3 USD/million = 150,000,000
-    assert cost_with_cached < cost_no_cached
-
-
-def test_pricing_provider_abc_contract():
+@pytest.mark.asyncio
+async def test_pricing_provider_abc_contract():
     """Test that PricingProvider enforces the abstract contract."""
-    # Can't instantiate without implementing get_model_pricing
     with pytest.raises(TypeError):
         PricingProvider()
 
-    # A proper implementation works
     class MyProvider(PricingProvider):
-        def get_model_pricing(self, model_id: str) -> dict:
-            return {"input": 1.0, "output": 2.0, "input_cached": None}
+        async def calculate_cost_from_response(self, model_id, usage, response):
+            return 42
 
     provider = MyProvider()
-    assert provider.get_model_pricing("x")["input"] == 1.0
+    assert await provider.supported_models() is None
 
 
-def test_custom_provider_calculate_cost():
-    """Test that a custom provider's calculate_cost_nanocents works."""
+@pytest.mark.asyncio
+async def test_custom_provider_calculate_cost():
+    """Test that a custom provider's calculate_cost_from_response works."""
 
     class FixedProvider(PricingProvider):
-        def get_model_pricing(self, model_id: str) -> dict:
-            return {
-                "id": model_id,
-                "input": 10.0,   # $10 per million input tokens
-                "output": 20.0,  # $20 per million output tokens
-                "input_cached": 5.0,
-            }
+        async def calculate_cost_from_response(self, model_id, usage, response):
+            input_tokens = usage.input or 0
+            output_tokens = usage.output or 0
+            # $10 per million input, $20 per million output
+            return int(input_tokens * 10.0 * 100_000 + output_tokens * 20.0 * 100_000)
 
     provider = FixedProvider()
 
-    # 1000 input, 500 output, no cached
-    cost = provider.calculate_cost_nanocents("any-model", input_tokens=1000, output_tokens=500)
+    cost = await provider.calculate_cost_from_response(
+        "any-model", Usage(input=1000, output=500), None
+    )
     # Input: 1000 * 10.0 * 100_000 = 1,000,000,000
     # Output: 500 * 20.0 * 100_000 = 1,000,000,000
     assert cost == 2_000_000_000
 
-    # With cached tokens
-    cost_cached = provider.calculate_cost_nanocents(
-        "any-model", input_tokens=1000, output_tokens=500, cached_input_tokens=400
-    )
-    # Uncached input: 600 * 10.0 * 100_000 = 600,000,000
-    # Cached input: 400 * 5.0 * 100_000 = 200,000,000
-    # Output: 500 * 20.0 * 100_000 = 1,000,000,000
-    assert cost_cached == 1_800_000_000
+
+@pytest.mark.asyncio
+async def test_supported_models():
+    """Test supported_models on DefaultPricingProvider."""
+    provider = DefaultPricingProvider()
+    supported = await provider.supported_models()
+    assert "gpt-4o-mini" in supported
+    assert "nonexistent-model-xyz" not in supported
+
+
+def test_nanocents_class():
+    """Test the Nanocents wrapper type."""
+    n = Nanocents(100_000_000_000)
+    assert n == 100_000_000_000
+    assert isinstance(n, int)
+    assert isinstance(n, Nanocents)
+
+    # to_usd / to_cents
+    assert n.to_usd() == 1.0
+    assert n.to_cents() == 100.0
+    assert Nanocents(50_000_000_000).to_usd() == 0.5
+    assert Nanocents(1_000_000_000).to_usd() == 0.01
+
+    # from_usd / from_cents
+    assert Nanocents.from_usd(1.0) == 100_000_000_000
+    assert Nanocents.from_usd(0.5) == 50_000_000_000
+    assert Nanocents.from_usd(0.01) == 1_000_000_000
+    assert Nanocents.from_usd(10.0) == 1_000_000_000_000
+    assert Nanocents.from_usd(1.50) == 150_000_000_000
+    assert Nanocents.from_cents(50) == 50_000_000_000
+    assert isinstance(Nanocents.from_usd(1.0), Nanocents)
+
+    # Arithmetic works like int
+    assert Nanocents(10) + Nanocents(20) == 30
+    assert Nanocents(10) + 5 == 15
+
+
+@pytest.mark.asyncio
+async def test_calculate_cost_returns_nanocents():
+    """Test that calculate_cost_from_response returns a Nanocents instance."""
+    provider = DefaultPricingProvider()
+    usage = Usage(input=1000, output=500)
+    cost = await provider.calculate_cost_from_response("gpt-4o-mini", usage, None)
+    assert isinstance(cost, Nanocents)
 
 
 def test_default_pricing_provider_is_pricing_provider():
     """Test that DefaultPricingProvider is a proper PricingProvider subclass."""
     provider = DefaultPricingProvider()
     assert isinstance(provider, PricingProvider)
-    # Should be able to look up a known model
-    pricing = provider.get_model_pricing("gpt-4o-mini")
-    assert pricing["id"] == "gpt-4o-mini"

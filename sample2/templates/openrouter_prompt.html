@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+
+{% block title %}OpenRouter Prompt{% endblock %}
+
+{% block extra_head %}
+<style>
+  .prompt-wrapper { max-width: 720px; }
+  .actor-info { color: #666; margin-bottom: 1.5rem; }
+  .prompt-wrapper label { display: block; font-weight: 600; margin: 1rem 0 0.25rem; }
+  .prompt-wrapper select,
+  .prompt-wrapper textarea { width: 100%; padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+  .prompt-wrapper textarea { height: 120px; resize: vertical; }
+  .prompt-wrapper button { margin-top: 1rem; padding: 0.5rem 1.5rem; font-size: 1rem; background: #2563eb; color: white; border: none; border-radius: 4px; cursor: pointer; }
+  .prompt-wrapper button:disabled { background: #93b4f5; cursor: wait; }
+  #result { margin-top: 1.5rem; }
+  .response-box { background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; padding: 1rem; white-space: pre-wrap; font-family: monospace; font-size: 0.9rem; max-height: 400px; overflow-y: auto; }
+  .meta { color: #666; font-size: 0.85rem; margin-top: 0.5rem; }
+  .error { color: #dc2626; font-weight: 600; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="prompt-wrapper">
+  <h1>OpenRouter Prompt</h1>
+  <p class="actor-info">Actor: {{ actor_id }}</p>
+
+  <form id="prompt-form" onsubmit="return submitPrompt(event)">
+    <label for="model">Model</label>
+    <select id="model" required>
+      <option value="">Loading models...</option>
+    </select>
+
+    <label for="prompt">Prompt</label>
+    <textarea id="prompt" placeholder="Ask something..." required></textarea>
+
+    <button type="submit" id="submit-btn">Send</button>
+  </form>
+
+  <div id="result"></div>
+</div>
+
+<script>
+  async function loadModels() {
+    const resp = await fetch('{{ urls.path("/-/openrouter/api/available-models") }}');
+    const data = await resp.json();
+    const select = document.getElementById('model');
+    select.innerHTML = '';
+    if (!data.models.length) {
+      select.innerHTML = '<option value="">No models available</option>';
+      return;
+    }
+    for (const m of data.models) {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = m.id;
+      select.appendChild(opt);
+    }
+  }
+
+  async function submitPrompt(e) {
+    e.preventDefault();
+    const btn = document.getElementById('submit-btn');
+    const resultDiv = document.getElementById('result');
+    const model = document.getElementById('model').value;
+    const prompt = document.getElementById('prompt').value;
+
+    btn.disabled = true;
+    btn.textContent = 'Sending...';
+    resultDiv.innerHTML = '';
+
+    try {
+      const resp = await fetch('{{ urls.path("/-/openrouter/api/prompt") }}', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({model, prompt}),
+      });
+      const data = await resp.json();
+      if (data.error) {
+        resultDiv.innerHTML = `<p class="error">${escapeHtml(data.error)}</p>`;
+      } else {
+        resultDiv.innerHTML = `
+          <div class="response-box">${escapeHtml(data.response)}</div>
+          <p class="meta">
+            Model: ${data.model} |
+            Input: ${data.input_tokens} tokens |
+            Output: ${data.output_tokens} tokens
+          </p>`;
+      }
+    } catch (err) {
+      resultDiv.innerHTML = `<p class="error">${err.message}</p>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Send';
+    }
+  }
+
+  function escapeHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  loadModels();
+</script>
+{% endblock %}

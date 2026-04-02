@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+
+{% block title %}Demo{% endblock %}
+
+{% block content %}
+<style>
+.llm-demo { max-width: 800px; margin: 0 auto; }
+.llm-demo h2 { font-size: 18px; margin: 24px 0 12px; border-bottom: 1px solid #ddd; padding-bottom: 6px; }
+.llm-demo table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+.llm-demo th, .llm-demo td { padding: 6px 10px; text-align: left; border-bottom: 1px solid #eee; }
+.llm-demo th { font-size: 12px; text-transform: uppercase; color: #666; }
+.llm-demo td.mono { font-family: monospace; }
+.llm-demo .warn { color: #a60; }
+.llm-demo .danger { color: #c00; }
+.llm-demo .field { display: flex; flex-direction: column; }
+.llm-demo .field label { font-size: 12px; color: #555; margin-bottom: 2px; }
+.llm-demo .field input, .llm-demo .field select { padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+.llm-demo .field textarea { padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; font-family: inherit; min-height: 100px; resize: vertical; width: 100%; box-sizing: border-box; }
+.llm-demo button { padding: 6px 14px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
+.llm-demo .btn-primary { background: #4a90d9; color: white; }
+.llm-demo .btn-primary:disabled { background: #a0c4e8; cursor: default; }
+.llm-demo .response-box { background: #f7f7f7; border: 1px solid #ddd; border-radius: 6px; padding: 16px; margin-top: 16px; white-space: pre-wrap; line-height: 1.5; }
+.llm-demo .response-box.error { background: #fff0f0; border-color: #e88; color: #a00; }
+.llm-demo .meta { font-size: 12px; color: #888; margin-top: 8px; }
+.llm-demo .actor-info { font-size: 13px; color: #666; margin-bottom: 16px; padding: 8px 12px; background: #f0f4f8; border-radius: 4px; }
+.llm-demo .budget-bar { margin-bottom: 16px; }
+.llm-demo .budget-bar .bar { height: 20px; background: #e0e0e0; border-radius: 4px; overflow: hidden; }
+.llm-demo .budget-bar .bar-fill { height: 100%; background: #4a90d9; transition: width 0.3s; }
+.llm-demo .budget-bar .bar-fill.warn { background: #f0ad4e; }
+.llm-demo .budget-bar .bar-fill.danger { background: #d9534f; }
+.llm-demo .budget-info { font-size: 13px; margin-top: 4px; color: #555; }
+.llm-demo .muted { color: #888; }
+</style>
+
+<div class="llm-demo">
+
+<h1>Demo</h1>
+<div class="actor-info">Actor: <strong>{{ actor_id }}</strong></div>
+
+<h2>Your Budget</h2>
+<div id="budget-display"></div>
+
+<h2>Prompt</h2>
+
+<div class="field" style="margin-bottom: 10px;">
+    <label for="model">Model</label>
+    <select id="model"><option>Loading...</option></select>
+</div>
+<div class="field" style="margin-bottom: 10px;">
+    <label for="prompt">Prompt</label>
+    <textarea id="prompt" placeholder="Ask something..."></textarea>
+</div>
+<button class="btn-primary" id="btn-send">Send</button>
+
+<div id="prompt-result"></div>
+
+</div>
+
+<script>
+(function() {
+    var API = '/-/demo/api';
+
+    function post(url, data) {
+        return fetch(API + url, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data),
+        }).then(function(r) { return r.json(); });
+    }
+
+    function fmt(v) { return '$' + Number(v).toFixed(4); }
+
+    function esc(s) {
+        var d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+    }
+
+    // --- Budget display ---
+    function loadBudget() {
+        fetch(API + '/my-budget').then(function(r) { return r.json(); }).then(function(data) {
+            var el = document.getElementById('budget-display');
+            if (!data.budget) {
+                el.innerHTML = '<p class="muted">No budget allocated. Ask an admin to set one up.</p>';
+                return;
+            }
+            var b = data.budget;
+            var pct = b.budget_usd > 0 ? (b.spent_usd / b.budget_usd * 100) : 0;
+            var cls = pct > 80 ? 'danger' : pct > 50 ? 'warn' : '';
+            el.innerHTML = '<div class="budget-bar">'
+                + '<div class="bar"><div class="bar-fill ' + cls + '" style="width: ' + Math.min(pct, 100) + '%"></div></div>'
+                + '<div class="budget-info">Spent: <strong>' + fmt(b.spent_usd) + '</strong> / ' + fmt(b.budget_usd)
+                + ' (remaining: <strong>' + fmt(b.remaining_usd) + '</strong>)</div>'
+                + '</div>';
+        });
+    }
+
+    loadBudget();
+
+    // --- Models ---
+    fetch(API + '/models').then(function(r) { return r.json(); }).then(function(data) {
+        var sel = document.getElementById('model');
+        sel.innerHTML = '';
+        (data.models || []).forEach(function(m) {
+            var opt = document.createElement('option');
+            opt.value = m;
+            opt.textContent = m;
+            sel.appendChild(opt);
+        });
+        if (!data.models || !data.models.length) {
+            sel.innerHTML = '<option value="" disabled>No models available</option>';
+        }
+    });
+
+    // --- Prompt ---
+    document.getElementById('btn-send').addEventListener('click', function() {
+        var btn = this;
+        var model = document.getElementById('model').value;
+        var prompt = document.getElementById('prompt').value.trim();
+        var resultEl = document.getElementById('prompt-result');
+
+        if (!prompt) { resultEl.innerHTML = '<div class="response-box error">Please enter a prompt.</div>'; return; }
+        if (!model) { resultEl.innerHTML = '<div class="response-box error">Please select a model.</div>'; return; }
+
+        btn.disabled = true;
+        btn.textContent = 'Sending...';
+        resultEl.innerHTML = '<div class="response-box">Waiting for response...</div>';
+
+        post('/prompt', {model: model, prompt: prompt}).then(function(data) {
+            btn.disabled = false;
+            btn.textContent = 'Send';
+            if (data.error) {
+                resultEl.innerHTML = '<div class="response-box error">' + esc(data.error) + '</div>';
+            } else {
+                resultEl.innerHTML = '<div class="response-box">' + esc(data.response) + '</div>'
+                    + '<div class="meta">Model: ' + esc(data.model)
+                    + ' | Tokens: ' + data.input_tokens + ' in / ' + data.output_tokens + ' out'
+                    + '</div>';
+            }
+            loadBudget();
+        }).catch(function(err) {
+            btn.disabled = false;
+            btn.textContent = 'Send';
+            resultEl.innerHTML = '<div class="response-box error">Request failed: ' + esc(err.message) + '</div>';
+        });
+    });
+})();
+</script>
+{% endblock %}

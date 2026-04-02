@@ -21,8 +21,12 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "sqlite-utils",
-    "llm-echo"
+    "llm-echo",
+    "datasette-debug-gotham"
 ]
+
+[tool.uv.sources]
+datasette-llm = { path = "../datasette-llm" }
 
 [build-system]
 requires = ["setuptools"]

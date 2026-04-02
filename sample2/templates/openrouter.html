@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>OpenRouter Admin</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { margin-bottom: 0.5rem; }
+    table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+    th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #ddd; }
+    th { background: #f5f5f5; }
+    .tab-bar { display: flex; gap: 0; margin-bottom: 1rem; }
+    .tab-bar button { padding: 0.5rem 1.5rem; border: 1px solid #ccc; background: #f5f5f5; cursor: pointer; }
+    .tab-bar button.active { background: white; border-bottom: 1px solid white; font-weight: bold; }
+    .tab { display: none; }
+    .tab.active { display: block; }
+    .count { color: #666; font-size: 0.9rem; }
+    .price { font-family: monospace; }
+    #loading { color: #666; }
+  </style>
+</head>
+<body>
+  <h1>OpenRouter</h1>
+  <div class="tab-bar">
+    <button class="active" onclick="showTab('models')">Models</button>
+    <button onclick="showTab('usage')">Usage Log</button>
+  </div>
+
+  <div id="models-tab" class="tab active">
+    <p id="loading">Loading models...</p>
+    <table id="models-table" style="display:none">
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th>Context</th>
+          <th>Input $/M</th>
+          <th>Output $/M</th>
+        </tr>
+      </thead>
+      <tbody id="models-body"></tbody>
+    </table>
+    <p id="models-count" class="count"></p>
+  </div>
+
+  <div id="usage-tab" class="tab">
+    <table id="usage-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Actor</th>
+          <th>Model</th>
+          <th>Purpose</th>
+          <th>Cost</th>
+        </tr>
+      </thead>
+      <tbody id="usage-body"></tbody>
+    </table>
+  </div>
+
+  <script>
+    function showTab(name) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-bar button').forEach(b => b.classList.remove('active'));
+      document.getElementById(name + '-tab').classList.add('active');
+      event.target.classList.add('active');
+    }
+
+    async function loadModels() {
+      const resp = await fetch('/-/openrouter/api/models');
+      const data = await resp.json();
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('models-table').style.display = '';
+      document.getElementById('models-count').textContent = data.count + ' models';
+      const tbody = document.getElementById('models-body');
+      tbody.innerHTML = '';
+      for (const m of data.models) {
+        const promptPerM = m.prompt_price ? (parseFloat(m.prompt_price) * 1e6).toFixed(2) : '-';
+        const compPerM = m.completion_price ? (parseFloat(m.completion_price) * 1e6).toFixed(2) : '-';
+        const ctx = m.context_length ? m.context_length.toLocaleString() : '-';
+        tbody.innerHTML += `<tr>
+          <td>${m.id}</td>
+          <td>${ctx}</td>
+          <td class="price">$${promptPerM}</td>
+          <td class="price">$${compPerM}</td>
+        </tr>`;
+      }
+    }
+
+    async function loadUsage() {
+      const resp = await fetch('/-/openrouter/api/usage');
+      const data = await resp.json();
+      const tbody = document.getElementById('usage-body');
+      tbody.innerHTML = '';
+      if (!data.usage.length) {
+        tbody.innerHTML = '<tr><td colspan="5">No usage recorded yet.</td></tr>';
+        return;
+      }
+      for (const u of data.usage) {
+        tbody.innerHTML += `<tr>
+          <td>${u.created_at || '-'}</td>
+          <td>${u.actor_id || '-'}</td>
+          <td>${u.model_id || '-'}</td>
+          <td>${u.purpose || '-'}</td>
+          <td class="price">$${u.cost_usd.toFixed(6)}</td>
+        </tr>`;
+      }
+    }
+
+    loadModels();
+    loadUsage();
+  </script>
+</body>
+</html>

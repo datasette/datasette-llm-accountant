@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}LLM Demo{% endblock %}
+{% block title %}Demo Admin{% endblock %}
 
 {% block content %}
 <style>
@@ -31,7 +31,7 @@
 
 <div class="llm-demo">
 
-<h1>LLM Demo</h1>
+<h1>Demo Admin</h1>
 <div class="actor-info">Actor: <strong>{{ actor_id }}</strong></div>
 
 <h2>Budgets</h2>
@@ -54,6 +54,26 @@
 
 <div id="budgets-table"></div>
 
+<h2>Model Pricing</h2>
+
+<div class="inline-form">
+    <div class="field">
+        <label for="pricing_model_id">Model ID</label>
+        <input id="pricing_model_id" type="text" placeholder="gpt-5.4-mini" style="width: 200px;">
+    </div>
+    <div class="field">
+        <label for="pricing_input">Input ($/M tokens)</label>
+        <input id="pricing_input" type="number" step="0.01" min="0" placeholder="3.00" style="width: 120px;">
+    </div>
+    <div class="field">
+        <label for="pricing_output">Output ($/M tokens)</label>
+        <input id="pricing_output" type="number" step="0.01" min="0" placeholder="15.00" style="width: 120px;">
+    </div>
+    <button class="btn-primary" id="btn-set-pricing">Set Pricing</button>
+</div>
+
+<div id="pricing-table"></div>
+
 <h2>Prompt</h2>
 
 <div class="field" style="margin-bottom: 10px;">
@@ -72,7 +92,7 @@
 
 <script>
 (function() {
-    var API = '/-/llm-demo/api';
+    var API = '/-/demo/api';
 
     function post(url, data) {
         return fetch(API + url, {
@@ -144,20 +164,68 @@
 
     loadBudgets();
 
-    // --- Models ---
-    fetch(API + '/models').then(function(r) { return r.json(); }).then(function(data) {
-        var sel = document.getElementById('model');
-        sel.innerHTML = '';
-        (data.models || []).forEach(function(m) {
-            var opt = document.createElement('option');
-            opt.value = m;
-            opt.textContent = m;
-            sel.appendChild(opt);
+    // --- Model Pricing ---
+    function loadModels() {
+        fetch(API + '/models').then(function(r) { return r.json(); }).then(function(data) {
+            var pricing = data.pricing || {};
+            var el = document.getElementById('pricing-table');
+
+            if (!Object.keys(pricing).length) {
+                el.innerHTML = '<p class="muted">No model pricing configured yet.</p>';
+            } else {
+                var html = '<table><thead><tr><th>Model</th><th>Input ($/M)</th><th>Output ($/M)</th><th></th></tr></thead><tbody>';
+                Object.keys(pricing).sort().forEach(function(mid) {
+                    var p = pricing[mid];
+                    html += '<tr>'
+                        + '<td>' + esc(mid) + '</td>'
+                        + '<td class="mono">' + Number(p.input).toFixed(2) + '</td>'
+                        + '<td class="mono">' + Number(p.output).toFixed(2) + '</td>'
+                        + '<td><button class="btn-danger" data-remove-pricing="' + esc(mid) + '">Remove</button></td>'
+                        + '</tr>';
+                });
+                html += '</tbody></table>';
+                el.innerHTML = html;
+
+                el.querySelectorAll('[data-remove-pricing]').forEach(function(btn) {
+                    btn.addEventListener('click', function() {
+                        post('/models/remove-pricing', {model_id: btn.dataset.removePricing}).then(loadModels);
+                    });
+                });
+            }
+
+            // Update prompt model dropdown with available (priced) models
+            var sel = document.getElementById('model');
+            sel.innerHTML = '';
+            (data.models || []).forEach(function(m) {
+                var opt = document.createElement('option');
+                opt.value = m;
+                opt.textContent = m;
+                sel.appendChild(opt);
+            });
+            if (!data.models || !data.models.length) {
+                sel.innerHTML = '<option value="" disabled>No models with pricing available</option>';
+            }
         });
-        if (!data.models || !data.models.length) {
-            sel.innerHTML = '<option value="" disabled>No models with pricing available</option>';
-        }
+    }
+
+    document.getElementById('btn-set-pricing').addEventListener('click', function() {
+        var modelId = document.getElementById('pricing_model_id').value.trim();
+        var inputPrice = document.getElementById('pricing_input').value.trim();
+        var outputPrice = document.getElementById('pricing_output').value.trim();
+        if (!modelId || !inputPrice || !outputPrice) return;
+        post('/models/set-pricing', {
+            model_id: modelId,
+            input_price: parseFloat(inputPrice),
+            output_price: parseFloat(outputPrice),
+        }).then(function() {
+            document.getElementById('pricing_model_id').value = '';
+            document.getElementById('pricing_input').value = '';
+            document.getElementById('pricing_output').value = '';
+            loadModels();
+        });
     });
+
+    loadModels();
 
     // --- Prompt ---
     document.getElementById('btn-send').addEventListener('click', function() {
@@ -182,7 +250,7 @@
                 resultEl.innerHTML = '<div class="response-box">' + esc(data.response) + '</div>'
                     + '<div class="meta">Model: ' + esc(data.model)
                     + ' | Tokens: ' + data.input_tokens + ' in / ' + data.output_tokens + ' out'
-                    + ' | Cost: $' + data.cost_usd.toFixed(6) + '</div>';
+                    + '</div>';
             }
             loadBudgets();
         }).catch(function(err) {

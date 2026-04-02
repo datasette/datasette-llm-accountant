@@ -5,17 +5,14 @@ from . import hookspecs
 
 pm.add_hookspecs(hookspecs)
 
-from . import hooks
+from . import hooks  # noqa: E402
 
-from .accountant import Accountant, Tx, InsufficientBalanceError
-from .hooks import ReservationExceededError, GroupReservation
-from .pricing import (
+from .accountant import Accountant, Tx, InsufficientBalanceError  # noqa: E402
+from .hooks import ReservationExceededError, GroupReservation  # noqa: E402
+from .pricing import (  # noqa: E402
+    Nanocents,
     PricingProvider,
     DefaultPricingProvider,
-    calculate_cost_nanocents,
-    get_model_pricing,
-    usd_to_nanocents,
-    nanocents_to_usd,
     ModelPricingNotFoundError,
 )
 
@@ -26,23 +23,25 @@ __all__ = [
     "InsufficientBalanceError",
     # Errors
     "ReservationExceededError",
+    "GroupReservation",
     # Pricing providers
+    "Nanocents",
     "PricingProvider",
     "DefaultPricingProvider",
-    # Pricing utilities
-    "calculate_cost_nanocents",
-    "get_model_pricing",
-    "usd_to_nanocents",
-    "nanocents_to_usd",
     "ModelPricingNotFoundError",
 ]
 
 
 @hookimpl
-def llm_prompt_context(datasette, model_id, prompt, purpose):
-    return hooks.llm_prompt_context(datasette, model_id, prompt, purpose)
+def llm_prompt_context(datasette, model_id, prompt, purpose, actor):
+    return hooks.llm_prompt_context(datasette, model_id, prompt, purpose, actor)
 
 
 @hookimpl
 def llm_group_exit(datasette, group):
     return hooks.llm_group_exit(datasette, group)
+
+
+@hookimpl
+def llm_filter_models(datasette, models, actor, purpose):
+    return hooks.llm_filter_models(datasette, models, actor, purpose)

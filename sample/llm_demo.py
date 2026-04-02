@@ -1,17 +1,17 @@
 """
-Sample plugin: LLM demo page with per-actor budget management.
+Sample plugin: LLM demo with per-actor budget management.
 
-Provides a single page at /-/llm-demo with:
-- Budget management: set, reset, delete per-actor budgets
-- Prompt form: pick a model, enter a prompt, see the response with cost tracking
+Provides:
+- /-/demo-admin (root only): manage budgets, model pricing
+- /-/demo (any actor with a budget): prompt UI with cost tracking
 
-Budgets are stored in the internal database.
+Budgets and pricing are stored in the internal database.
 All mutations use JSON API routes (no CSRF needed).
 """
 
-import contextvars
 import json
 import uuid
+from typing import Optional
 
 from datasette import hookimpl
 from datasette.utils.asgi import Response
@@ -21,16 +21,10 @@ from datasette_llm_accountant import (
     Accountant,
     Tx,
     InsufficientBalanceError,
+    Nanocents,
     PricingProvider,
-    DefaultPricingProvider,
     ModelPricingNotFoundError,
-    nanocents_to_usd,
-    usd_to_nanocents,
 )
-
-# ContextVar so the accountant can identify the current actor
-# (hooks don't receive the request object)
-_current_actor = contextvars.ContextVar("current_actor", default="anonymous")
 
 
 CREATE_TABLES_SQL = """
@@ -51,6 +45,13 @@ CREATE TABLE IF NOT EXISTS llm_budget_transactions (
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (actor_id) REFERENCES llm_budgets(actor_id)
 );
+
+CREATE TABLE IF NOT EXISTS llm_model_pricing (
+    model_id TEXT PRIMARY KEY,
+    input_price REAL NOT NULL,
+    output_price REAL NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 
@@ -63,11 +64,7 @@ async def ensure_tables(datasette):
 
 
 class BudgetAccountant(Accountant):
-    """Per-actor accountant backed by the internal DB.
-
-    Uses a contextvars.ContextVar to determine the current actor_id,
-    since the hook-based accounting doesn't have access to the request.
-    """
+    """Per-actor accountant backed by the internal DB."""
 
     def __init__(self, datasette):
         self.datasette = datasette
@@ -75,10 +72,10 @@ class BudgetAccountant(Accountant):
     async def reserve(
         self,
         nanocents: int,
-        model_id: str = None,
-        purpose: str = None,
+        model_id: Optional[str] = None,
+        purpose: Optional[str] = None,
+        actor_id: Optional[str] = None,
     ) -> Tx:
-        actor_id = _current_actor.get()
         await ensure_tables(self.datasette)
         db = self.datasette.get_internal_database()
 
@@ -90,15 +87,13 @@ class BudgetAccountant(Accountant):
         ).first()
 
         if row is None:
-            raise InsufficientBalanceError(
-                f"No budget set for actor '{actor_id}'"
-            )
+            raise InsufficientBalanceError(f"No budget set for actor '{actor_id}'")
 
         remaining = row["budget_nanocents"] - row["spent_nanocents"]
         if nanocents > remaining:
             raise InsufficientBalanceError(
-                f"Insufficient budget: need ${nanocents_to_usd(nanocents):.6f}, "
-                f"remaining ${nanocents_to_usd(remaining):.6f}"
+                f"Insufficient budget: need ${Nanocents(nanocents).to_usd():.6f}, "
+                f"remaining ${Nanocents(remaining).to_usd():.6f}"
             )
 
         tx_id = Tx(str(uuid.uuid4()))
@@ -112,10 +107,12 @@ class BudgetAccountant(Accountant):
         self,
         tx: Tx,
         nanocents: int,
-        model_id: str = None,
-        purpose: str = None,
+        model_id: Optional[str] = None,
+        purpose: Optional[str] = None,
+        actor_id: Optional[str] = None,
     ):
-        actor_id = _current_actor.get()
+        if not actor_id:
+            return  # No actor — nothing to settle against
         await ensure_tables(self.datasette)
         db = self.datasette.get_internal_database()
 
@@ -129,6 +126,8 @@ class BudgetAccountant(Accountant):
         )
 
     async def rollback(self, tx: Tx):
+        if tx == "no-actor":
+            return
         await ensure_tables(self.datasette)
         db = self.datasette.get_internal_database()
         await db.execute_write(
@@ -137,217 +136,344 @@ class BudgetAccountant(Accountant):
         )
 
 
-# Singleton accountant instance (created lazily per datasette instance)
-_accountant_cache = {}
+class DemoPricingProvider(PricingProvider):
+    """Provides pricing from admin-configured per-model rates.
+
+    Queries the DB directly — no in-memory cache needed since
+    calculate_cost_from_response is async.
+    """
+
+    def __init__(self, datasette):
+        self.datasette = datasette
+
+    async def _get_pricing(self, model_id: str) -> dict:
+        await ensure_tables(self.datasette)
+        db = self.datasette.get_internal_database()
+        row = (
+            await db.execute(
+                "SELECT input_price, output_price FROM llm_model_pricing WHERE model_id = ?",
+                [model_id],
+            )
+        ).first()
+        if row is None:
+            raise ModelPricingNotFoundError(
+                f"No pricing configured for '{model_id}'. An admin must set it first."
+            )
+        return {"input": row["input_price"], "output": row["output_price"]}
+
+    async def supported_models(self):
+        await ensure_tables(self.datasette)
+        db = self.datasette.get_internal_database()
+        rows = (await db.execute("SELECT model_id FROM llm_model_pricing")).rows
+        return {row["model_id"] for row in rows}
+
+    async def calculate_cost_from_response(self, model_id, usage, response) -> Nanocents:
+        pricing = await self._get_pricing(model_id)
+        input_tokens = usage.input or 0
+        output_tokens = usage.output or 0
+        input_cost = (input_tokens / 1_000_000) * pricing["input"]
+        output_cost = (output_tokens / 1_000_000) * pricing["output"]
+        return Nanocents(int((input_cost + output_cost) * 1_000_000_000))
 
 
-def _get_accountant(datasette):
-    ds_id = id(datasette)
-    if ds_id not in _accountant_cache:
-        _accountant_cache[ds_id] = BudgetAccountant(datasette)
-    return _accountant_cache[ds_id]
+# --- Routes ---
+
+
+class Routes:
+    @staticmethod
+    async def budgets_list(datasette, request):
+        await ensure_tables(datasette)
+        db = datasette.get_internal_database()
+        rows = (await db.execute("SELECT * FROM llm_budgets ORDER BY actor_id")).rows
+        budgets = []
+        for row in rows:
+            budget_usd = Nanocents(row["budget_nanocents"]).to_usd()
+            spent_usd = Nanocents(row["spent_nanocents"]).to_usd()
+            budgets.append(
+                {
+                    "actor_id": row["actor_id"],
+                    "budget_usd": budget_usd,
+                    "spent_usd": spent_usd,
+                    "remaining_usd": budget_usd - spent_usd,
+                }
+            )
+        return Response.json({"budgets": budgets})
+
+    @staticmethod
+    async def budget_set(datasette, request):
+        if request.method != "POST":
+            return Response.json({"error": "POST required"}, status=405)
+        body = json.loads(await request.post_body())
+        actor_id = str(body.get("actor_id", "")).strip()
+        budget_usd = body.get("budget_usd")
+        if not actor_id or budget_usd is None:
+            return Response.json({"error": "actor_id and budget_usd required"}, status=400)
+        try:
+            budget_usd = float(budget_usd)
+        except (ValueError, TypeError):
+            return Response.json({"error": "budget_usd must be a number"}, status=400)
+        await ensure_tables(datasette)
+        db = datasette.get_internal_database()
+        await db.execute_write(
+            """INSERT INTO llm_budgets (actor_id, budget_nanocents)
+            VALUES (?, ?)
+            ON CONFLICT(actor_id) DO UPDATE SET
+                budget_nanocents = excluded.budget_nanocents,
+                updated_at = datetime('now')""",
+            [actor_id, Nanocents.from_usd(budget_usd)],
+        )
+        return Response.json({"ok": True})
+
+    @staticmethod
+    async def budget_reset(datasette, request):
+        if request.method != "POST":
+            return Response.json({"error": "POST required"}, status=405)
+        body = json.loads(await request.post_body())
+        actor_id = str(body.get("actor_id", "")).strip()
+        if not actor_id:
+            return Response.json({"error": "actor_id required"}, status=400)
+        await ensure_tables(datasette)
+        db = datasette.get_internal_database()
+        await db.execute_write(
+            "UPDATE llm_budgets SET spent_nanocents = 0, updated_at = datetime('now') WHERE actor_id = ?",
+            [actor_id],
+        )
+        return Response.json({"ok": True})
+
+    @staticmethod
+    async def budget_delete(datasette, request):
+        if request.method != "POST":
+            return Response.json({"error": "POST required"}, status=405)
+        body = json.loads(await request.post_body())
+        actor_id = str(body.get("actor_id", "")).strip()
+        if not actor_id:
+            return Response.json({"error": "actor_id required"}, status=400)
+        await ensure_tables(datasette)
+        db = datasette.get_internal_database()
+        await db.execute_write(
+            "DELETE FROM llm_budget_transactions WHERE actor_id = ?", [actor_id]
+        )
+        await db.execute_write("DELETE FROM llm_budgets WHERE actor_id = ?", [actor_id])
+        return Response.json({"ok": True})
+
+    @staticmethod
+    async def models_list(datasette, request):
+        import llm as llm_library
+        from datasette_llm import LLM
+
+        llm = LLM(datasette)
+        all_models = [m.model_id for m in llm_library.get_async_models()]
+        available = [m.model_id for m in await llm.models()]
+        await ensure_tables(datasette)
+        db = datasette.get_internal_database()
+        rows = (
+            await db.execute("SELECT model_id, input_price, output_price FROM llm_model_pricing")
+        ).rows
+        pricing = {
+            row["model_id"]: {"input": row["input_price"], "output": row["output_price"]}
+            for row in rows
+        }
+        return Response.json(
+            {
+                "all_models": all_models,
+                "models": available,
+                "pricing": pricing,
+            }
+        )
+
+    @staticmethod
+    async def model_set_pricing(datasette, request):
+        if request.method != "POST":
+            return Response.json({"error": "POST required"}, status=405)
+        if not request.actor or request.actor.get("id") != "root":
+            return Response.json({"error": "root access required"}, status=403)
+        body = json.loads(await request.post_body())
+        model_id = str(body.get("model_id", "")).strip()
+        input_price = body.get("input_price")
+        output_price = body.get("output_price")
+        if not model_id or input_price is None or output_price is None:
+            return Response.json(
+                {"error": "model_id, input_price, and output_price required"}, status=400
+            )
+        try:
+            input_price = float(input_price)
+            output_price = float(output_price)
+        except (ValueError, TypeError):
+            return Response.json(
+                {"error": "input_price and output_price must be numbers"}, status=400
+            )
+        await ensure_tables(datasette)
+        db = datasette.get_internal_database()
+        await db.execute_write(
+            """INSERT INTO llm_model_pricing (model_id, input_price, output_price)
+            VALUES (?, ?, ?)
+            ON CONFLICT(model_id) DO UPDATE SET
+                input_price = excluded.input_price,
+                output_price = excluded.output_price""",
+            [model_id, input_price, output_price],
+        )
+        return Response.json({"ok": True})
+
+    @staticmethod
+    async def model_remove_pricing(datasette, request):
+        if request.method != "POST":
+            return Response.json({"error": "POST required"}, status=405)
+        if not request.actor or request.actor.get("id") != "root":
+            return Response.json({"error": "root access required"}, status=403)
+        body = json.loads(await request.post_body())
+        model_id = str(body.get("model_id", "")).strip()
+        if not model_id:
+            return Response.json({"error": "model_id required"}, status=400)
+        await ensure_tables(datasette)
+        db = datasette.get_internal_database()
+        await db.execute_write(
+            "DELETE FROM llm_model_pricing WHERE model_id = ?",
+            [model_id],
+        )
+        return Response.json({"ok": True})
+
+    @staticmethod
+    async def prompt(datasette, request):
+        if request.method != "POST":
+            return Response.json({"error": "POST required"}, status=405)
+        body = json.loads(await request.post_body())
+        model_id = str(body.get("model", "")).strip()
+        prompt_text = str(body.get("prompt", "")).strip()
+
+        if not model_id or not prompt_text:
+            return Response.json({"error": "model and prompt required"}, status=400)
+
+        actor = request.actor
+
+        from datasette_llm import LLM
+
+        try:
+            llm = LLM(datasette)
+            model = await llm.model(model_id, purpose="llm-demo", actor=actor)
+            response = await model.prompt(prompt_text)
+            response_text = await response.text()
+            usage = await response.usage()
+
+            # Cost calculation + settlement happens automatically via llm_prompt_context hook
+            return Response.json(
+                {
+                    "response": response_text,
+                    "model": model_id,
+                    "input_tokens": usage.input or 0,
+                    "output_tokens": usage.output or 0,
+                }
+            )
+        except InsufficientBalanceError as e:
+            return Response.json({"error": f"Budget error: {e}"}, status=402)
+        except Exception as e:
+            return Response.json({"error": str(e)}, status=500)
+
+    @staticmethod
+    async def my_budget(datasette, request):
+        """Return the current actor's budget info."""
+        actor = request.actor
+        actor_id = actor.get("id") if actor else None
+        if not actor_id:
+            return Response.json({"error": "Not logged in"}, status=401)
+        await ensure_tables(datasette)
+        db = datasette.get_internal_database()
+        row = (
+            await db.execute(
+                "SELECT budget_nanocents, spent_nanocents FROM llm_budgets WHERE actor_id = ?",
+                [actor_id],
+            )
+        ).first()
+        if row is None:
+            return Response.json({"budget": None})
+        budget_usd = Nanocents(row["budget_nanocents"]).to_usd()
+        spent_usd = Nanocents(row["spent_nanocents"]).to_usd()
+        return Response.json(
+            {
+                "budget": {
+                    "actor_id": actor_id,
+                    "budget_usd": budget_usd,
+                    "spent_usd": spent_usd,
+                    "remaining_usd": budget_usd - spent_usd,
+                }
+            }
+        )
+
+    @staticmethod
+    async def demo_admin_page(datasette, request):
+        actor = request.actor
+        if not actor or actor.get("id") != "root":
+            return Response.text("Root access required", status=403)
+        return Response.html(
+            await datasette.render_template(
+                "demo_admin.html",
+                {
+                    "actor_id": actor.get("id"),
+                    "actors": [{"id": k, "name": v["name"]} for k, v in ACTORS.items()],
+                },
+                request=request,
+            )
+        )
+
+    @staticmethod
+    async def demo_page(datasette, request):
+        actor = request.actor
+        if not actor:
+            return Response.text("Login required", status=403)
+        actor_id = actor.get("id")
+        return Response.html(
+            await datasette.render_template(
+                "demo.html",
+                {"actor_id": actor_id},
+                request=request,
+            )
+        )
+
+
+# --- Hooks ---
 
 
 @hookimpl
 def register_llm_accountants(datasette):
-    return [_get_accountant(datasette)]
-
-
-# --- Pricing: only allow gpt-5-nano ---
-
-ALLOWED_MODELS = {"gpt-5-nano"}
-
-
-class DemoPricingProvider(PricingProvider):
-    """Wraps the default provider but only exposes allowed models with 100x markup."""
-
-    def __init__(self):
-        self._default = DefaultPricingProvider()
-
-    def get_model_pricing(self, model_id: str) -> dict:
-        if model_id not in ALLOWED_MODELS:
-            raise ModelPricingNotFoundError(
-                f"Model '{model_id}' is not enabled in this demo. "
-                f"Allowed: {', '.join(sorted(ALLOWED_MODELS))}"
-            )
-        pricing = dict(self._default.get_model_pricing(model_id))
-        pricing["input"] = pricing["input"] * 100
-        pricing["output"] = pricing["output"] * 100
-        if pricing.get("input_cached") is not None:
-            pricing["input_cached"] = pricing["input_cached"] * 100
-        return pricing
+    return [BudgetAccountant(datasette)]
 
 
 @hookimpl
 def register_llm_accountant_pricing(datasette):
-    return DemoPricingProvider()
+    return DemoPricingProvider(datasette)
 
 
-# --- JSON API routes ---
-
-async def api_budgets_list(datasette, request):
-    await ensure_tables(datasette)
-    db = datasette.get_internal_database()
-    rows = (await db.execute("SELECT * FROM llm_budgets ORDER BY actor_id")).rows
-    budgets = []
-    for row in rows:
-        budget_usd = nanocents_to_usd(row["budget_nanocents"])
-        spent_usd = nanocents_to_usd(row["spent_nanocents"])
-        budgets.append({
-            "actor_id": row["actor_id"],
-            "budget_usd": budget_usd,
-            "spent_usd": spent_usd,
-            "remaining_usd": budget_usd - spent_usd,
-        })
-    return Response.json({"budgets": budgets})
-
-
-async def api_budget_set(datasette, request):
-    if request.method != "POST":
-        return Response.json({"error": "POST required"}, status=405)
-    body = json.loads(await request.post_body())
-    actor_id = str(body.get("actor_id", "")).strip()
-    budget_usd = body.get("budget_usd")
-    if not actor_id or budget_usd is None:
-        return Response.json({"error": "actor_id and budget_usd required"}, status=400)
-    try:
-        budget_usd = float(budget_usd)
-    except (ValueError, TypeError):
-        return Response.json({"error": "budget_usd must be a number"}, status=400)
-    await ensure_tables(datasette)
-    db = datasette.get_internal_database()
-    await db.execute_write(
-        """INSERT INTO llm_budgets (actor_id, budget_nanocents)
-        VALUES (?, ?)
-        ON CONFLICT(actor_id) DO UPDATE SET
-            budget_nanocents = excluded.budget_nanocents,
-            updated_at = datetime('now')""",
-        [actor_id, usd_to_nanocents(budget_usd)],
-    )
-    return Response.json({"ok": True})
-
-
-async def api_budget_reset(datasette, request):
-    if request.method != "POST":
-        return Response.json({"error": "POST required"}, status=405)
-    body = json.loads(await request.post_body())
-    actor_id = str(body.get("actor_id", "")).strip()
-    if not actor_id:
-        return Response.json({"error": "actor_id required"}, status=400)
-    await ensure_tables(datasette)
-    db = datasette.get_internal_database()
-    await db.execute_write(
-        "UPDATE llm_budgets SET spent_nanocents = 0, updated_at = datetime('now') WHERE actor_id = ?",
-        [actor_id],
-    )
-    return Response.json({"ok": True})
-
-
-async def api_budget_delete(datasette, request):
-    if request.method != "POST":
-        return Response.json({"error": "POST required"}, status=405)
-    body = json.loads(await request.post_body())
-    actor_id = str(body.get("actor_id", "")).strip()
-    if not actor_id:
-        return Response.json({"error": "actor_id required"}, status=400)
-    await ensure_tables(datasette)
-    db = datasette.get_internal_database()
-    await db.execute_write("DELETE FROM llm_budget_transactions WHERE actor_id = ?", [actor_id])
-    await db.execute_write("DELETE FROM llm_budgets WHERE actor_id = ?", [actor_id])
-    return Response.json({"ok": True})
-
-
-async def api_models_list(datasette, request):
-    from datasette_llm import LLM
-    from datasette_llm_accountant.hooks import _get_pricing_provider
-
-    llm = LLM(datasette)
-    provider = _get_pricing_provider(datasette)
-    models = []
-    for m in await llm.models():
-        try:
-            provider.get_model_pricing(m.model_id)
-            models.append(m.model_id)
-        except ModelPricingNotFoundError:
-            pass
-    return Response.json({"models": models})
-
-
-async def api_prompt(datasette, request):
-    if request.method != "POST":
-        return Response.json({"error": "POST required"}, status=405)
-    body = json.loads(await request.post_body())
-    model_id = str(body.get("model", "")).strip()
-    prompt_text = str(body.get("prompt", "")).strip()
-
-    if not model_id or not prompt_text:
-        return Response.json({"error": "model and prompt required"}, status=400)
-
-    actor = request.actor
-    actor_id = (actor.get("id") if actor else None) or "anonymous"
-
-    from datasette_llm import LLM
-    from datasette_llm_accountant.hooks import _get_pricing_provider
-
-    # Set the actor contextvar so BudgetAccountant knows who's making the request
-    token = _current_actor.set(actor_id)
-    try:
-        llm = LLM(datasette)
-        model = await llm.model(model_id, purpose="llm-demo")
-        response = await model.prompt(prompt_text)
-        response_text = await response.text()
-        usage = await response.usage()
-        input_tokens = usage.input or 0
-        output_tokens = usage.output or 0
-
-        provider = _get_pricing_provider(datasette)
-        cost_usd = nanocents_to_usd(
-            provider.calculate_cost_nanocents(
-                model_id,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-            )
-        )
-        return Response.json({
-            "response": response_text,
-            "model": model_id,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cost_usd": cost_usd,
-        })
-    except InsufficientBalanceError as e:
-        return Response.json({"error": f"Budget error: {e}"}, status=402)
-    except Exception as e:
-        return Response.json({"error": str(e)}, status=500)
-    finally:
-        _current_actor.reset(token)
-
-
-# --- Page route (GET only, serves template) ---
-
-async def llm_demo_page(datasette, request):
-    actor = request.actor
-    actor_id = (actor.get("id") if actor else None) or "anonymous"
-    return Response.html(
-        await datasette.render_template(
-            "llm_demo.html",
+@hookimpl
+def menu_links(datasette, actor, request):
+    links = []
+    if actor and actor.get("id") == "root":
+        links.append(
             {
-                "actor_id": actor_id,
-                "actors": [{"id": k, "name": v["name"]} for k, v in ACTORS.items()],
-            },
-            request=request,
+                "href": datasette.urls.path("/-/demo-admin"),
+                "label": "Demo Admin",
+            }
         )
-    )
+    if actor:
+        links.append(
+            {
+                "href": datasette.urls.path("/-/demo"),
+                "label": "Demo",
+            }
+        )
+    return links
 
 
 @hookimpl
 def register_routes():
     return [
-        (r"^/-/llm-demo$", llm_demo_page),
-        (r"^/-/llm-demo/api/budgets$", api_budgets_list),
-        (r"^/-/llm-demo/api/budgets/set$", api_budget_set),
-        (r"^/-/llm-demo/api/budgets/reset$", api_budget_reset),
-        (r"^/-/llm-demo/api/budgets/delete$", api_budget_delete),
-        (r"^/-/llm-demo/api/models$", api_models_list),
-        (r"^/-/llm-demo/api/prompt$", api_prompt),
+        (r"^/-/demo-admin$", Routes.demo_admin_page),
+        (r"^/-/demo$", Routes.demo_page),
+        (r"^/-/demo/api/budgets$", Routes.budgets_list),
+        (r"^/-/demo/api/budgets/set$", Routes.budget_set),
+        (r"^/-/demo/api/budgets/reset$", Routes.budget_reset),
+        (r"^/-/demo/api/budgets/delete$", Routes.budget_delete),
+        (r"^/-/demo/api/models$", Routes.models_list),
+        (r"^/-/demo/api/models/set-pricing$", Routes.model_set_pricing),
+        (r"^/-/demo/api/models/remove-pricing$", Routes.model_remove_pricing),
+        (r"^/-/demo/api/prompt$", Routes.prompt),
+        (r"^/-/demo/api/my-budget$", Routes.my_budget),
     ]
