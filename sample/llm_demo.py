@@ -26,7 +26,6 @@ from datasette_llm_accountant import (
     ModelPricingNotFoundError,
 )
 
-
 CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS llm_budgets (
     actor_id TEXT PRIMARY KEY,
@@ -167,7 +166,9 @@ class DemoPricingProvider(PricingProvider):
         rows = (await db.execute("SELECT model_id FROM llm_model_pricing")).rows
         return {row["model_id"] for row in rows}
 
-    async def calculate_cost_from_response(self, model_id, usage, response) -> Nanocents:
+    async def calculate_cost_from_response(
+        self, model_id, usage, response
+    ) -> Nanocents:
         pricing = await self._get_pricing(model_id)
         input_tokens = usage.input or 0
         output_tokens = usage.output or 0
@@ -207,7 +208,9 @@ class Routes:
         actor_id = str(body.get("actor_id", "")).strip()
         budget_usd = body.get("budget_usd")
         if not actor_id or budget_usd is None:
-            return Response.json({"error": "actor_id and budget_usd required"}, status=400)
+            return Response.json(
+                {"error": "actor_id and budget_usd required"}, status=400
+            )
         try:
             budget_usd = float(budget_usd)
         except (ValueError, TypeError):
@@ -267,10 +270,15 @@ class Routes:
         await ensure_tables(datasette)
         db = datasette.get_internal_database()
         rows = (
-            await db.execute("SELECT model_id, input_price, output_price FROM llm_model_pricing")
+            await db.execute(
+                "SELECT model_id, input_price, output_price FROM llm_model_pricing"
+            )
         ).rows
         pricing = {
-            row["model_id"]: {"input": row["input_price"], "output": row["output_price"]}
+            row["model_id"]: {
+                "input": row["input_price"],
+                "output": row["output_price"],
+            }
             for row in rows
         }
         return Response.json(
@@ -293,7 +301,8 @@ class Routes:
         output_price = body.get("output_price")
         if not model_id or input_price is None or output_price is None:
             return Response.json(
-                {"error": "model_id, input_price, and output_price required"}, status=400
+                {"error": "model_id, input_price, and output_price required"},
+                status=400,
             )
         try:
             input_price = float(input_price)

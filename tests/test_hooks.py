@@ -2,6 +2,7 @@
 Tests for the datasette-llm hook integration.
 """
 
+import json
 import pytest
 from typing import Optional
 from datasette.app import Datasette
@@ -116,12 +117,66 @@ async def test_single_prompt_auto_reservation(datasette_with_accountant):
     assert accountant.reservations[0][2] == "echo"
     assert accountant.reservations[0][3] == "test"
 
-    # Settlement happens via on_done callback
-    # For echo model without pricing, it settles with 0
+    # Settlement happens via on_done callback.
     assert len(accountant.settlements) == 1
     # model_id and purpose should be recorded in settlement too
     assert accountant.settlements[0][2] == "echo"
     assert accountant.settlements[0][3] == "test"
+
+
+@pytest.mark.asyncio
+async def test_chain_settles_aggregate_cost():
+    """A chain should settle once with the total cost of all responses."""
+    from datasette_llm import LLM
+
+    test_accountant = AccountantTest()
+    pricing_provider = HardcodedPricingProvider()
+
+    class TestPlugin:
+        __name__ = "test_chain_accountant_plugin"
+
+        @hookimpl
+        def register_llm_accountants(self, datasette):
+            return [test_accountant]
+
+        @hookimpl
+        def register_llm_accountant_pricing(self, datasette):
+            return pricing_provider
+
+    def example(input: str) -> str:
+        return f"Example output for {input}"
+
+    datasette = Datasette(memory=True)
+    plugin = TestPlugin()
+    datasette.pm.register(plugin, name="test-chain-accountant")
+
+    try:
+        llm = LLM(datasette)
+        model = await llm.model("echo", purpose="test")
+        chain_response = model.chain(
+            json.dumps(
+                {
+                    "tool_calls": [
+                        {
+                            "name": "example",
+                            "arguments": {"input": "test"},
+                        }
+                    ],
+                    "prompt": "Test prompt",
+                }
+            ),
+            tools=[example],
+        )
+
+        async for response in chain_response.responses():
+            await response.text()
+
+        assert len(test_accountant.reservations) == 1
+        assert len(test_accountant.settlements) == 1
+        assert test_accountant.settlements[0][1] > 0
+        assert pricing_provider.calls == ["echo", "echo"]
+    finally:
+        datasette.pm.unregister(name="test-chain-accountant")
 
 
 @pytest.mark.asyncio

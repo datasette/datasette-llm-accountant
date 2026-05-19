@@ -30,7 +30,9 @@ async def test_calculate_cost_not_found():
     provider = DefaultPricingProvider()
     usage = Usage(input=100, output=50)
     with pytest.raises(ModelPricingNotFoundError) as exc_info:
-        await provider.calculate_cost_from_response("nonexistent-model-xyz", usage, None)
+        await provider.calculate_cost_from_response(
+            "nonexistent-model-xyz", usage, None
+        )
     assert "nonexistent-model-xyz" in str(exc_info.value)
 
 

@@ -9,7 +9,6 @@ from abc import ABC, abstractmethod
 from llm.models import AsyncResponse, Usage
 import httpx
 
-
 _PRICING_URL = "https://simonw.github.io/llm-prices/current-v1.json"
 _PRICING_TIMEOUT = 10.0
 
@@ -141,5 +140,3 @@ class DefaultPricingProvider(PricingProvider):
         )
 
         return Nanocents(input_cost + output_cost)
-
-

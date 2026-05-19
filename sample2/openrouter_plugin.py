@@ -32,7 +32,6 @@ from datasette_llm_accountant import (
 import llm
 from llm.default_plugins.openai_models import Chat, AsyncChat
 
-
 # --- OpenRouter API client ---
 
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
@@ -78,9 +77,7 @@ def _fetch_models() -> dict[str, dict]:
     for model in data.get("data", []):
         model_id = model["id"]
         # Only include text-output models
-        output_modalities = (
-            model.get("architecture", {}).get("output_modalities", [])
-        )
+        output_modalities = model.get("architecture", {}).get("output_modalities", [])
         if "text" not in output_modalities:
             continue
         # Apply filter if set
@@ -109,6 +106,7 @@ def _get_generation(generation_id: str) -> Optional[dict]:
 
 # --- LLM model registration ---
 
+
 # The --plugins-dir loader only registers with datasette's plugin manager,
 # not llm's. We need to manually register this module with llm's PM so
 # the register_models hook fires. We use a wrapper class since the module
@@ -118,6 +116,7 @@ class _LlmPluginHooks:
     @llm.hookimpl
     def register_models(register):
         _do_register_models(register)
+
 
 llm.plugins.pm.register(_LlmPluginHooks(), name="openrouter-plugin")
 
@@ -138,8 +137,8 @@ def _do_register_models(register):
             "supported_parameters", []
         )
 
-        input_modalities = (
-            model_data.get("architecture", {}).get("input_modalities", [])
+        input_modalities = model_data.get("architecture", {}).get(
+            "input_modalities", []
         )
         vision = "image" in input_modalities
 
@@ -180,7 +179,9 @@ class OpenRouterPricingProvider(PricingProvider):
         catalog = _fetch_models()
         return set(catalog.keys())
 
-    async def calculate_cost_from_response(self, model_id, usage, response) -> Nanocents:
+    async def calculate_cost_from_response(
+        self, model_id, usage, response
+    ) -> Nanocents:
         # Try exact cost from generation API first
         cost = self._cost_from_generation(response)
         if cost is not None:
@@ -220,9 +221,7 @@ class OpenRouterPricingProvider(PricingProvider):
         """Calculate cost from token counts and cached pricing."""
         catalog = _fetch_models()
         if model_id not in catalog:
-            raise ModelPricingNotFoundError(
-                f"No OpenRouter pricing for '{model_id}'."
-            )
+            raise ModelPricingNotFoundError(f"No OpenRouter pricing for '{model_id}'.")
 
         pricing = catalog[model_id].get("pricing", {})
         # OpenRouter prices are strings in USD per token
@@ -314,9 +313,7 @@ async def openrouter_admin_page(datasette, request):
         return Response.text("Root access required", status=403)
 
     return Response.html(
-        await datasette.render_template(
-            "openrouter.html", {}, request=request
-        )
+        await datasette.render_template("openrouter.html", {}, request=request)
     )
 
 
@@ -417,9 +414,7 @@ async def api_openrouter_available_models(datasette, request):
     actor = request.actor
     llm_client = LLM(datasette)
     models = await llm_client.models(actor=actor, purpose="openrouter-demo")
-    return Response.json(
-        {"models": [{"id": m.model_id} for m in models]}
-    )
+    return Response.json({"models": [{"id": m.model_id} for m in models]})
 
 
 @hookimpl

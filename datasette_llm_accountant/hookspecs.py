@@ -10,11 +10,14 @@ from pluggy import HookspecMarker
 
 from datasette_llm_accountant.accountant import Accountant
 from datasette_llm_accountant.pricing import PricingProvider
+
 hookspec = HookspecMarker("datasette")
 
 
 @hookspec
-def register_llm_accountants(datasette) -> Optional[Union[list[Accountant], Accountant]]:
+def register_llm_accountants(
+    datasette,
+) -> Optional[Union[list[Accountant], Accountant]]:
     """
     Register accountants for tracking LLM token usage costs.
 
