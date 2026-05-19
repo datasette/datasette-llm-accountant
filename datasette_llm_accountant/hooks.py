@@ -160,6 +160,11 @@ def _calculate_reservation_nanocents(datasette, model_id, purpose) -> Nanocents:
     return Nanocents.from_usd(0.50)
 
 
+async def _response_cost(provider, model_id, response) -> Nanocents:
+    usage = await response.usage()
+    return await provider.calculate_cost_from_response(model_id, usage, response)
+
+
 def llm_prompt_context(datasette, model_id, prompt, purpose, actor):
     """
     Wrap prompt execution with accounting.
@@ -203,14 +208,12 @@ def llm_prompt_context(datasette, model_id, prompt, purpose, actor):
 
             yield
 
-            # Track usage via on_done callback
-            if reservation and result.response:
+            # Track usage via on_done callback. result.on_response_done()
+            # handles both direct prompts and every response in a chain.
+            if reservation:
 
                 async def track_group_usage(response):
-                    usage = await response.usage()
-                    cost = await provider.calculate_cost_from_response(
-                        model_id, usage, response
-                    )
+                    cost = await _response_cost(provider, model_id, response)
                     reservation.add_usage(cost)
 
                     if reservation.exceeded():
@@ -219,7 +222,7 @@ def llm_prompt_context(datasette, model_id, prompt, purpose, actor):
                             f"exceeds reservation of {reservation.nanocents} nanocents"
                         )
 
-                await result.response.on_done(track_group_usage)
+                await result.on_response_done(track_group_usage)
 
         else:
             # Not part of a group - auto-reserve for this single prompt
@@ -246,16 +249,26 @@ def llm_prompt_context(datasette, model_id, prompt, purpose, actor):
             try:
                 yield
 
-                # Track usage and settle via on_done
-                if result.response:
+                # For model.chain(), datasette-llm keeps this context open
+                # until the chain iterator finishes. At that point all chain
+                # responses are available, so settle once for their aggregate
+                # usage. Direct prompts still settle via on_done so returning a
+                # streaming response is not blocked by accounting.
+                if result.is_chain:
+                    try:
+                        for response in result.responses:
+                            reservation.add_usage(
+                                await _response_cost(provider, model_id, response)
+                            )
+                    finally:
+                        await reservation.settle_all()
+                elif result.response:
 
                     async def track_and_settle(response):
                         try:
-                            usage = await response.usage()
-                            cost = await provider.calculate_cost_from_response(
-                                model_id, usage, response
+                            reservation.add_usage(
+                                await _response_cost(provider, model_id, response)
                             )
-                            reservation.add_usage(cost)
                         finally:
                             await reservation.settle_all()
 
