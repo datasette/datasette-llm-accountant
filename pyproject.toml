@@ -1,6 +1,6 @@
 [project]
 name = "datasette-llm-accountant"
-version = "0.1a3"
+version = "0.1a4"
 description = "Accounting for LLM token usage"
 readme = "README.md"
 authors = [{name = "Simon Willison"}]
@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 dependencies = [
     "datasette>=1.0a21",
     "datasette-llm>=0.1a8",
-    "llm",
+    "llm>=0.32a1",
     "httpx"
 ]
 
